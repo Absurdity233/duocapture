@@ -32,8 +32,10 @@ jobs:
       - name: Configure
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 
+      # 只构建可移植层。duocore / duocapd / duocapv / luma_stats 依赖
+      # D3D11 与 WASAPI，在 Linux 上本来就不该存在。
       - name: Build
-        run: cmake --build build -j
+        run: cmake --build build --target duonet duo_net_tests -j
 
       - name: Test
         run: ctest --test-dir build --output-on-failure

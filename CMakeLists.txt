@@ -62,33 +62,35 @@ endif()
 
 # ---------------------------------------------------------------- core library
 # Windows 专属：采集、编解码、呈现、音频、推流、管线。
-add_library(duocore STATIC
-  src/capture/capture_factory.cpp
-  src/capture/color_converter.cpp
-  src/capture/ddapi_capture.cpp
-  src/capture/wgc_capture.cpp
-  src/encode/nvenc_encoder.cpp
-  src/decode/nvdec_decoder.cpp
-  src/decode/nvdec_cuvid.cpp
-  src/present/swapchain_presenter.cpp
-  src/present/telemetry_overlay.cpp
-  src/audio/wasapi_loopback.cpp
-  src/audio/aac_encoder.cpp
-  src/audio/aac_decoder.cpp
-  src/audio/wasapi_render.cpp
-  src/record/stream_pusher.cpp
-  src/pipeline/sender.cpp
-  src/plugin/plugin_host.cpp
-  src/pipeline/receiver.cpp
-)
-
-target_link_libraries(duocore PUBLIC duonet)
-
-target_include_directories(duocore PUBLIC
-  ${CMAKE_CURRENT_SOURCE_DIR}/third_party/nv-codec-headers-n13.0.19.0/include/ffnvcodec
-)
-
+# 整个 target 只在 Windows 下生成——非 Windows 上这些源文件连编译单元
+# 都不该被创建，否则 `cmake --build` 会去碰 D3D11 头文件而失败。
 if(WIN32)
+  add_library(duocore STATIC
+    src/capture/capture_factory.cpp
+    src/capture/color_converter.cpp
+    src/capture/ddapi_capture.cpp
+    src/capture/wgc_capture.cpp
+    src/encode/nvenc_encoder.cpp
+    src/decode/nvdec_decoder.cpp
+    src/decode/nvdec_cuvid.cpp
+    src/present/swapchain_presenter.cpp
+    src/present/telemetry_overlay.cpp
+    src/audio/wasapi_loopback.cpp
+    src/audio/aac_encoder.cpp
+    src/audio/aac_decoder.cpp
+    src/audio/wasapi_render.cpp
+    src/record/stream_pusher.cpp
+    src/pipeline/sender.cpp
+    src/plugin/plugin_host.cpp
+    src/pipeline/receiver.cpp
+  )
+
+  target_link_libraries(duocore PUBLIC duonet)
+
+  target_include_directories(duocore PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/nv-codec-headers-n13.0.19.0/include/ffnvcodec
+  )
+
   target_compile_definitions(duocore PRIVATE
     WIN32_LEAN_AND_MEAN
     NOMINMAX
@@ -97,6 +99,7 @@ if(WIN32)
     _UNICODE
     DUO_HAVE_D3D11=1
   )
+
   # C++/WinRT 投影随 Windows SDK 提供，但不在默认 include 搜索路径里。
   file(GLOB DUO_WINSDK_INCLUDE_DIRS "C:/Program Files (x86)/Windows Kits/10/Include/10.*")
   list(SORT DUO_WINSDK_INCLUDE_DIRS)
@@ -120,13 +123,10 @@ if(WIN32)
     ws2_32 d3d11 dxgi d3dcompiler mfplat mfuuid mfreadwrite mf mfcore ole32
     windowsapp
   )
-else()
-  find_package(Threads REQUIRED)
-  target_link_libraries(duocore PUBLIC Threads::Threads)
-endif()
 
-if(DUO_ENABLE_NVENC)
-  target_compile_definitions(duocore PRIVATE DUO_ENABLE_NVENC=1)
+  if(DUO_ENABLE_NVENC)
+    target_compile_definitions(duocore PRIVATE DUO_ENABLE_NVENC=1)
+  endif()
 endif()
 
 # ---------------------------------------------------------------- applications
@@ -159,6 +159,7 @@ if(WIN32 AND DUO_BUILD_EXAMPLE_PLUGINS)
     target_link_libraries(duo_plugin_luma_stats PRIVATE d3d11 dxgi)
   endif()
 endif()
+
 # ---------------------------------------------------------------- tests
 # 可移植部分：协议、FEC、抖动缓冲、SPS、分析 tap、控制通道。
 # 这些在 Linux CI 上也会跑，不是只在 Windows 上验证。
