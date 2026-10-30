@@ -31,7 +31,7 @@ inline constexpr u32 kProtocolMagic = 0x314F5544u;
 inline constexpr u16 kProtocolVersion = 1;
 
 // 默认端口
-inline constexpr u16 kDefaultVideoPort = 5000;
-inline constexpr u16 kDefaultControlPort = 5001;
+inline constexpr u16 kDefaultVideoPort = 50000;
+inline constexpr u16 kDefaultControlPort = 50001;
 
 }  // namespace duo

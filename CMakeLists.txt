@@ -30,14 +30,23 @@ add_library(duocore STATIC
   src/net/pacer.cpp
   src/net/jitter_buffer.cpp
   src/net/transport.cpp
+  src/capture/capture_factory.cpp
+  src/capture/color_converter.cpp
   src/capture/ddapi_capture.cpp
+  src/capture/wgc_capture.cpp
   src/encode/nvenc_encoder.cpp
   src/decode/nvdec_decoder.cpp
+  src/decode/sps_parser.cpp
   src/present/swapchain_presenter.cpp
+  src/pipeline/sender.cpp
+  src/pipeline/receiver.cpp
   src/pipeline/selftest.cpp
 )
 
-target_include_directories(duocore PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_include_directories(duocore PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/include
+  ${CMAKE_CURRENT_SOURCE_DIR}/third_party/nv-codec-headers-n13.0.19.0/include/ffnvcodec
+)
 
 if(WIN32)
   target_compile_definitions(duocore PRIVATE
@@ -46,8 +55,31 @@ if(WIN32)
     _WIN32_WINNT=0x0A00
     UNICODE
     _UNICODE
+    DUO_HAVE_D3D11=1
   )
-  target_link_libraries(duocore PUBLIC ws2_32 d3d11 dxgi)
+  # C++/WinRT 投影随 Windows SDK 提供，但不在默认 include 搜索路径里。
+  file(GLOB DUO_WINSDK_INCLUDE_DIRS "C:/Program Files (x86)/Windows Kits/10/Include/10.*")
+  list(SORT DUO_WINSDK_INCLUDE_DIRS)
+  list(LENGTH DUO_WINSDK_INCLUDE_DIRS DUO_WINSDK_COUNT)
+
+  if(DUO_WINSDK_COUNT GREATER 0)
+    math(EXPR DUO_WINSDK_LAST "${DUO_WINSDK_COUNT} - 1")
+    list(GET DUO_WINSDK_INCLUDE_DIRS ${DUO_WINSDK_LAST} DUO_WINSDK_LATEST)
+    set(DUO_CPPWINRT_INCLUDE "${DUO_WINSDK_LATEST}/cppwinrt")
+    if(EXISTS "${DUO_CPPWINRT_INCLUDE}")
+      target_include_directories(duocore PUBLIC "${DUO_CPPWINRT_INCLUDE}")
+      message(STATUS "C++/WinRT: ${DUO_CPPWINRT_INCLUDE}")
+    else()
+      message(WARNING "未找到 C++/WinRT 投影，WGC 后端将不可用")
+    endif()
+  else()
+    message(WARNING "未找到 Windows SDK，WGC 后端将不可用")
+  endif()
+
+  target_link_libraries(duocore PUBLIC
+    ws2_32 d3d11 dxgi d3dcompiler mfplat mfuuid mfreadwrite mf mfcore ole32
+    windowsapp
+  )
 else()
   find_package(Threads REQUIRED)
   target_link_libraries(duocore PUBLIC Threads::Threads)
@@ -70,6 +102,7 @@ if(DUO_BUILD_TESTS)
   add_executable(duo_tests
     tests/test_main.cpp
     tests/net_tests.cpp
+    tests/sps_tests.cpp
   )
   target_link_libraries(duo_tests PRIVATE duocore)
   add_test(NAME duo_tests COMMAND duo_tests)

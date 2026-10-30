@@ -95,7 +95,8 @@ bool run_net_selftest(bool verbose) {
   }
 
   // 6. 限速器：整帧入队后，单次 poll 不应把整帧都放行。
-  Pacer pacer(50ull * 1000 * 1000);  // 50 MB/s
+  // 用较小的 burst（4 KB）确保节流行为可观测，而不是依赖默认 burst 大小。
+  Pacer pacer(50ull * 1000 * 1000, 4 * 1024);  // 50 MB/s, burst 4 KB
   for (const Packet& packet : packets) {
     pacer.enqueue(packet);
   }
@@ -103,6 +104,7 @@ bool run_net_selftest(bool verbose) {
   const std::size_t released = pacer.poll(Clock::now_ns(), out.data(), out.size());
   pass &= check(released < packets.size(), "pacer throttles burst instead of dumping the frame",
                 verbose);
+  pass &= check(released > 0, "pacer releases at least one packet", verbose);
 
   return pass;
 }

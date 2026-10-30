@@ -9,8 +9,8 @@
 | 阶段 | 内容 | 状态 |
 |---|---|---|
 | M0 | 工程骨架、协议、传输、FEC、抖动缓冲、采集探测 | ✅ 已完成 |
-| M1 | WGC 采集 + NVENC 编码 + 本地解码回显 | 🚧 进行中 |
-| M2 | 双机 UDP 传输 + 控制通道 | ⏳ 待开始 |
+| M1 | WGC/DDAPI 采集 + NV12 转换 + NVENC 编码 + 解码 + 呈现 | ✅ 已完成 |
+| M2 | 双机 UDP 传输 + FEC + 限速 + 抖动缓冲 + 编解码协商 | ✅ 已完成 |
 | M3 | 音频 + remux 录制 + 推流 | ⏳ 待开始 |
 | M4 | 分析 tap + 双路分发 | ⏳ 待开始 |
 
@@ -24,12 +24,13 @@
 - UDP 传输层（Windows / POSIX）
 - DXGI Desktop Duplication 采集与显示器枚举（Windows）
 
-**已定义接口、尚未实现**
-
-- NVENC 编码器（需要 NVIDIA Video Codec SDK，`-DDUO_ENABLE_NVENC=ON`）
-- NVDEC / D3D11VA 解码器
-- 交换链呈现器
-- 完整 Sender / Receiver 管线
+- NVENC 硬件编码器（运行时动态加载 `nvEncodeAPI64.dll`，无需 SDK 头文件即可构建）
+- BGRA → NV12 GPU 转换（两趟 compute shader，BT.709 limited range）
+- Media Foundation 解码（优先硬件 MFT，自动回退软件 MFT + CPU 上传）
+- flip-model 交换链呈现（DXGI tearing，最大帧延迟 1）
+- 完整 Sender / Receiver 多线程管线
+- 编码格式随包头发送，接收端自动选择解码器
+- SPS 解析（H.264 / HEVC）以确定解码器输入的分辨率
 
 ## 快速开始
 
@@ -43,15 +44,26 @@ ctest --test-dir build -C Release --output-on-failure
 # 列出可采集的显示器
 duocapd --list-displays
 
-# 跑一遍网络层自检（打包 → FEC → 乱序 → 重组）
+# 网络层自检（打包 → FEC → 乱序 → 重组）
 duocapd --selftest
 
 # 采集探测：抓 5 秒，打印帧率与帧尺寸
 duocapd --probe 5
 
-# 监听 UDP，打印收包统计
-duocapv --monitor 5000
+# B 端推流
+duocapd --stream --target 192.168.1.20 --fps 120 --bitrate 80
+
+# A 端接收并呈现
+duocapv --play
+
+# 无持续画面来源时，用录制的裸流回放来验证传输/解码/呈现
+duocapd --stream --playback capture.h264 --target 127.0.0.1
+
+# 录制编码后的裸码流（零转码，可直接喂 ffplay）
+duocapd --stream --target 127.0.0.1 --record capture.h264
 ```
+
+端口默认 50000（视频）/ 50001（控制）。避开 5000，Windows 上该端口常被系统服务占用。
 
 ## 架构
 

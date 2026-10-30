@@ -23,7 +23,7 @@ struct PacketHeader {
   u8 fec_group;       // 帧内 FEC 组序号
   u8 fec_index;       // 组内序号；等于 fec_count 表示这是校验包
   u8 fec_count;       // 该组的数据包数量（0 表示未启用 FEC）
-  u16 reserved;       // 置 0
+  u16 reserved;       // 高 8 位：Codec（0=h264 1=hevc 2=av1）；低 8 位：FEC 校验包的尾包长度
   u32 frame_id;       // 帧序号，单调递增
   u16 pkt_index;      // 帧内包序号（数据包）；校验包用 kParityIndexBase + 组号
   u16 pkt_count;      // 该帧的数据包总数

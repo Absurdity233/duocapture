@@ -184,6 +184,9 @@ class DdapiCapture final : public ICaptureSource {
 
   [[nodiscard]] const char* backend_name() const override { return "dxgi-desktop-duplication"; }
 
+  [[nodiscard]] void* d3d_device() const override { return device_.Get(); }
+  [[nodiscard]] void* d3d_context() const override { return context_.Get(); }
+
  private:
   ComPtr<ID3D11Device> device_;
   ComPtr<ID3D11DeviceContext> context_;
@@ -231,7 +234,7 @@ std::vector<std::string> list_displays() {
   return out;
 }
 
-std::unique_ptr<ICaptureSource> create_capture_source() {
+std::unique_ptr<ICaptureSource> create_ddapi_capture_source() {
   return std::make_unique<DdapiCapture>();
 }
 
@@ -246,7 +249,7 @@ namespace duo {
 
 std::vector<std::string> list_displays() { return {}; }
 
-std::unique_ptr<ICaptureSource> create_capture_source() { return nullptr; }
+std::unique_ptr<ICaptureSource> create_ddapi_capture_source() { return nullptr; }
 
 }  // namespace duo
 

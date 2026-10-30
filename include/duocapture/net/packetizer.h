@@ -11,6 +11,8 @@ struct FrameMeta {
   u32 frame_id = 0;
   u64 capture_ts_ns = 0;
   bool key = false;
+  // 编码格式，随包头发送，接收端据此选解码器。
+  u8 codec = 1;  // 0=h264 1=hevc 2=av1
   u32 width = 0;
   u32 height = 0;
 };

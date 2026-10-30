@@ -1,29 +1,46 @@
 // duocapd —— B 端（被采集机）程序。
 //
-// 当前可用：显示器枚举、网络层自检、采集探测。
-// 完整推流管线（采集 → NVENC → UDP）在 M1 落地。
+// 用法:
+//   duocapd --list-displays
+//   duocapd --selftest
+//   duocapd --probe [秒数]
+//   duocapd --stream --target <主机> [选项]
 
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <thread>
 
 #include "duocapture/capture/capture_source.h"
 #include "duocapture/common/clock.h"
 #include "duocapture/common/log.h"
 #include "duocapture/pipeline/selftest.h"
+#include "duocapture/pipeline/sender.h"
 
 namespace {
+
+constexpr const char* kVersion = "0.2.0";
 
 void print_usage() {
   std::printf(
       "duocapd %s\n"
       "用法:\n"
-      "  duocapd --list-displays          列出可采集的显示器\n"
-      "  duocapd --selftest               运行网络层自检\n"
-      "  duocapd --probe [秒数]           采集探测，默认 5 秒\n"
-      "  duocapd --stream [选项]          启动推流（M1 实现）\n",
-      "0.1.0");
+      "  duocapd --list-displays                列出可采集的显示器\n"
+      "  duocapd --selftest                     运行网络层自检\n"
+      "  duocapd --probe [秒数]                 采集探测，默认 5 秒\n"
+      "  duocapd --stream --target <主机> [选项] 推流\n"
+      "\n"
+      "推流选项:\n"
+      "  --port <端口>          目标端口，默认 %u\n"
+      "  --display <序号>       显示器序号，默认 0\n"
+      "  --fps <帧率>           默认 120\n"
+      "  --bitrate <Mbps>       默认 80\n"
+      "  --codec <hevc|h264|av1> 默认 hevc\n"
+      "  --no-fec               关闭前向纠错\n"
+      "  --ddapi                使用 DXGI Desktop Duplication 而非 WGC\n",
+      kVersion, static_cast<unsigned>(duo::kDefaultVideoPort));
 }
 
 int run_list_displays() {
@@ -39,7 +56,7 @@ int run_list_displays() {
 }
 
 int run_probe(double seconds) {
-  auto source = duo::create_capture_source();
+  auto source = duo::create_capture_source(true);
   if (!source) {
     std::printf("当前平台没有可用的采集后端\n");
     return 1;
@@ -103,6 +120,86 @@ int run_probe(double seconds) {
   return frames > 0 ? 0 : 1;
 }
 
+int run_stream(int argc, char** argv) {
+  duo::SenderConfig config;
+  config.target_host.clear();
+
+  for (int i = 2; i < argc; ++i) {
+    const std::string arg = argv[i];
+    const bool has_next = i + 1 < argc;
+
+    if (arg == "--target" && has_next) {
+      config.target_host = argv[++i];
+    } else if (arg == "--port" && has_next) {
+      config.target_port = static_cast<duo::u16>(std::atoi(argv[++i]));
+    } else if (arg == "--display" && has_next) {
+      config.display_index = static_cast<duo::u32>(std::atoi(argv[++i]));
+    } else if (arg == "--fps" && has_next) {
+      config.fps = static_cast<duo::u32>(std::atoi(argv[++i]));
+    } else if (arg == "--bitrate" && has_next) {
+      config.bitrate_bps = static_cast<duo::u32>(std::atof(argv[++i]) * 1'000'000);
+    } else if (arg == "--codec" && has_next) {
+      const std::string codec = argv[++i];
+      if (codec == "h264") {
+        config.codec = duo::Codec::H264;
+      } else if (codec == "av1") {
+        config.codec = duo::Codec::Av1;
+      } else {
+        config.codec = duo::Codec::Hevc;
+      }
+    } else if (arg == "--no-fec") {
+      config.enable_fec = false;
+    } else if (arg == "--no-intra-refresh") {
+      config.intra_refresh = false;
+    } else if (arg == "--record" && has_next) {
+      config.record_path = argv[++i];
+    } else if (arg == "--playback" && has_next) {
+      config.playback_path = argv[++i];
+    } else if (arg == "--ddapi") {
+      config.prefer_wgc = false;
+    }
+  }
+
+  if (config.target_host.empty() && config.playback_path.empty()) {
+    std::printf("缺少 --target <主机>（或 --playback <文件>）\n");
+    return 1;
+  }
+
+  duo::Sender sender;
+  duo::Status status = sender.start(config);
+  if (!duo::ok(status)) {
+    std::printf("启动发送端失败: %s\n", duo::to_string(status));
+    return 1;
+  }
+
+  std::printf("推流中，Ctrl+C 停止\n");
+  duo::u64 prev_bytes = 0;
+  duo::u64 prev_packets = 0;
+  auto prev_time = std::chrono::steady_clock::now();
+  while (sender.running()) {
+    std::this_thread::sleep_for(std::chrono::seconds(1));
+    const duo::SenderStats stats = sender.stats();
+    const auto now = std::chrono::steady_clock::now();
+    const double dt = std::chrono::duration<double>(now - prev_time).count();
+    // 码率必须用差分算。累计字节直接乘 8 得到的是"累计兆比特"，
+    // 看起来像码率飙升，其实只是累计量在增长。
+    const double mbps =
+        dt > 0.0 ? static_cast<double>(stats.bytes_sent - prev_bytes) * 8.0 / 1e6 / dt : 0.0;
+    const double pps = dt > 0.0 ? static_cast<double>(stats.packets_sent - prev_packets) / dt : 0.0;
+    std::printf("采集 %llu  编码 %llu  发送 %llu  包/s %.0f  码率 %.1f Mbps  编码 %.2f ms  错误 %llu\n",
+                static_cast<unsigned long long>(stats.frames_captured),
+                static_cast<unsigned long long>(stats.frames_encoded),
+                static_cast<unsigned long long>(stats.frames_sent), pps, mbps,
+                stats.avg_encode_ms, static_cast<unsigned long long>(stats.encode_errors));
+    prev_bytes = stats.bytes_sent;
+    prev_packets = stats.packets_sent;
+    prev_time = now;
+  }
+
+  sender.stop();
+  return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -128,8 +225,7 @@ int main(int argc, char** argv) {
     return run_probe(seconds > 0.0 ? seconds : 5.0);
   }
   if (mode == "--stream") {
-    std::printf("推流管线将在 M1 实现（采集 → NVENC → UDP）。\n");
-    return 1;
+    return run_stream(argc, argv);
   }
 
   print_usage();

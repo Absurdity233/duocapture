@@ -1,9 +1,11 @@
 #include "duocapture/net/jitter_buffer.h"
 
 #include <algorithm>
+#include <cstdio>
 
 #include "duocapture/common/clock.h"
 #include "duocapture/net/fec.h"
+#include "duocapture/common/log.h"
 
 namespace duo {
 
@@ -14,6 +16,18 @@ void JitterBuffer::insert(Packet packet) {
   ++stats_.packets_received;
 
   const u32 frame_id = packet.header.frame_id;
+
+  // 已经交付过的帧不再接受新包。否则延迟到达的冗余包会重建一个空 entry：
+  // pkt_count 从包里恢复成 40、data 为 0，随后被当作"未完成帧"淘汰，
+  // 日志上表现为莫名其妙的 0/40，同时白白占满窗口。
+  //
+  // 判定用"已交付的 frame_id 集合 + 单调下界"：frame_id 是发送端单调
+  // 递增的，凡是 <= 已交付最大值的都视为过期。乱序允许在窗口内，
+  // 但不会跨过已交付的帧。
+  if (delivered_valid_ && static_cast<i64>(frame_id) - static_cast<i64>(delivered_max_id_) <= 0) {
+    return;
+  }
+
   Entry& entry = frames_[frame_id];
 
   if (entry.pkt_count == 0) {
@@ -86,6 +100,9 @@ void JitterBuffer::evict_if_needed(u32 current_frame_id) {
     }
     if (!victim->second.complete) {
       ++stats_.frames_dropped;
+      DUO_WARN("淘汰未完成帧 %u: %zu/%u 包, 校验包 %zu", victim->first,
+               victim->second.data.size(), victim->second.pkt_count,
+               victim->second.parity.size());
     }
     frames_.erase(victim);
   }
@@ -113,6 +130,8 @@ bool JitterBuffer::try_pop(AssembledFrame& out) {
     }
 
     ++stats_.frames_assembled;
+    delivered_max_id_ = it->first;
+    delivered_valid_ = true;
     frames_.erase(it);
     return true;
   }

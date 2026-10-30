@@ -43,7 +43,7 @@ std::vector<Packet> Packetizer::packetize(const FrameMeta& meta, ByteSpan frame)
     packet.header.fec_group = 0;
     packet.header.fec_index = 0;
     packet.header.fec_count = 0;
-    packet.header.reserved = 0;
+    packet.header.reserved = static_cast<u16>(static_cast<u16>(meta.codec) << 8);
     packet.header.frame_id = meta.frame_id;
     packet.header.pkt_index = static_cast<u16>(i);
     packet.header.pkt_count = static_cast<u16>(count);

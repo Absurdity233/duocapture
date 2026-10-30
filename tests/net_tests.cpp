@@ -179,7 +179,8 @@ DUO_TEST(jitter_buffer_nacks_missing) {
 }
 
 DUO_TEST(pacer_throttles) {
-  duo::Pacer pacer(10ull * 1000 * 1000);  // 10 MB/s
+  // 1 MB/s，100 个满载包（约 123 KB）远超 burst 上限，必须分多次才放完。
+  duo::Pacer pacer(1000ull * 1000, 8 * 1024);  // 1 MB/s, burst 8 KB
 
   duo::Packet packet;
   packet.header.payload_len = duo::kMaxPacketPayload;
@@ -194,6 +195,7 @@ DUO_TEST(pacer_throttles) {
   const std::size_t released = pacer.poll(duo::Clock::now_ns(), out.data(), out.size());
   DUO_CHECK(released > 0);
   DUO_CHECK(released < 100);
+  DUO_CHECK_EQ(pacer.queued(), static_cast<std::size_t>(100 - released));
 }
 
 DUO_TEST(selftest_passes) { DUO_CHECK(duo::run_net_selftest(false)); }

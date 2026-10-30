@@ -1,0 +1,326 @@
+#include "duocapture/pipeline/receiver.h"
+
+#include <algorithm>
+#include <vector>
+
+#include "duocapture/common/clock.h"
+#include "duocapture/common/types.h"
+#include "duocapture/common/log.h"
+
+namespace duo {
+namespace {
+
+constexpr u32 kRecvBufferSize = 16u * 1024u * 1024u;
+constexpr u32 kMaxDatagram = 2048;
+
+}  // namespace
+
+Receiver::Receiver() : jitter_(8, 3) {}
+
+Receiver::~Receiver() { stop(); }
+
+Status Receiver::start(const ReceiverConfig& config) {
+  if (running_.load(std::memory_order_acquire)) {
+    return Status::InvalidArgument;
+  }
+
+  config_ = config;
+  stop_requested_.store(false, std::memory_order_release);
+  window_closed_.store(false, std::memory_order_release);
+
+  Status status = socket_.open("0.0.0.0", config_.listen_port);
+  if (!ok(status)) {
+    DUO_ERROR("绑定 %u 失败: %s", static_cast<unsigned>(config_.listen_port), to_string(status));
+    return status;
+  }
+  socket_.set_recv_buffer(kRecvBufferSize);
+
+  jitter_ = JitterBuffer(config_.jitter_window, config_.nack_delay_ms);
+
+  decoder_ = create_decoder();
+  if (!decoder_) {
+    DUO_ERROR("没有可用的解码后端");
+    socket_.close();
+    return Status::NotSupported;
+  }
+
+  if (config_.show_window) {
+    presenter_ = std::make_unique<Win32Presenter>();
+
+    // 先建窗口再建解码器：解码器需要与呈现器共用同一块 D3D11 设备，
+    // 这样解码输出的纹理才能直接送进视频处理器，不需要拷贝。
+    const u32 initial_width = config_.width != 0 ? config_.width : 1280;
+    const u32 initial_height = config_.height != 0 ? config_.height : 720;
+    status = presenter_->initialize(L"DuoCapture", initial_width, initial_height);
+    if (!ok(status)) {
+      DUO_ERROR("创建呈现窗口失败: %s", to_string(status));
+      socket_.close();
+      return status;
+    }
+
+    auto* d3d_decoder = dynamic_cast<D3d11vaDecoder*>(decoder_.get());
+    if (d3d_decoder == nullptr) {
+      DUO_ERROR("解码器不是 D3D11 实现，无法与呈现器共享设备");
+      socket_.close();
+      return Status::NotSupported;
+    }
+    status = d3d_decoder->initialize(presenter_->device(), presenter_->context());
+    if (!ok(status)) {
+      DUO_ERROR("解码器初始化失败: %s", to_string(status));
+      socket_.close();
+      return status;
+    }
+  }
+
+  running_.store(true, std::memory_order_release);
+  receive_thread_ = std::thread([this] { receive_loop(); });
+  if (presenter_) {
+    render_thread_ = std::thread([this] { render_loop(); });
+  }
+
+  DUO_INFO("接收端已启动: 监听 %u", static_cast<unsigned>(socket_.local_port()));
+  return Status::Ok;
+}
+
+void Receiver::receive_loop() {
+  std::vector<u8> buffer(kMaxDatagram);
+
+  while (!stop_requested_.load(std::memory_order_acquire)) {
+    std::size_t received = 0;
+    std::string from_host;
+    u16 from_port = 0;
+
+    const Status status =
+        socket_.recv_from(duo::MutByteSpan(buffer.data(), buffer.size()), received, from_host,
+                          from_port, 100);
+    if (status == Status::Timeout) {
+      continue;
+    }
+    if (!ok(status)) {
+      DUO_ERROR("接收失败: %s", to_string(status));
+      continue;
+    }
+
+    {
+      std::lock_guard<std::mutex> lock(stats_mutex_);
+      ++stats_.datagrams_received;
+    }
+
+    PacketHeader header{};
+    ByteSpan payload;
+    if (!parse(ByteSpan(buffer.data(), received), header, payload)) {
+      continue;
+    }
+
+    // 编码格式随包头发送，首帧到达时据此选解码器。
+    if (!decoder_configured_) {
+      const u8 codec_field = static_cast<u8>(header.reserved >> 8);
+      codec_ = codec_field == 0 ? Codec::H264 : (codec_field == 2 ? Codec::Av1 : Codec::Hevc);
+    }
+
+    Packet packet;
+    packet.header = header;
+    packet.payload.assign(payload.begin(), payload.end());
+    jitter_.insert(std::move(packet));
+
+    AssembledFrame frame;
+    while (jitter_.try_pop(frame)) {
+      {
+        std::lock_guard<std::mutex> lock(stats_mutex_);
+        ++stats_.frames_assembled;
+      }
+      if (!presenter_) {
+        continue;  // 无窗口模式只统计
+      }
+      if (decoder_ == nullptr) {
+        continue;
+      }
+
+      // 必须从关键帧开始。解码器配置也要用关键帧来做——SPS/PPS 只出现在
+      // 关键帧里，拿普通帧去提取只会得到空的 sequence header，解码器
+      // 随后会从别处猜出错误的分辨率（实测会报 1920x1080 而不是实际的
+      // 2560x1600），进而 ProcessOutput 直接 E_FAIL。
+      if (!seen_keyframe_) {
+        ++frames_since_start_;
+        if (!frame.key) {
+          // 用 intra refresh 时只有第一帧是 IDR，错过就再也等不到。
+          // 等 120 帧还没遇到关键帧就强行开始。
+          if (frames_since_start_ < 120) {
+            continue;
+          }
+          DUO_WARN("等待关键帧超时，从第 %u 帧强行开始解码", frame.frame_id);
+        } else {
+          DUO_INFO("从关键帧 %u 开始解码", frame.frame_id);
+        }
+        seen_keyframe_ = true;
+      }
+
+      if (!decoder_configured_) {
+        const Status decode_status = ensure_decoder(frame, config_.width, config_.height);
+        if (!ok(decode_status)) {
+          continue;
+        }
+      }
+
+      DecodedFrame decoded;
+      const Status decode_status =
+          decoder_->decode(ByteSpan(frame.data.data(), frame.data.size()), frame.capture_ts_ns,
+                           decoded);
+      if (decode_status == Status::WouldBlock) {
+        continue;
+      }
+      if (!ok(decode_status)) {
+        std::lock_guard<std::mutex> lock(stats_mutex_);
+        ++stats_.decoder_errors;
+        continue;
+      }
+
+      {
+        std::lock_guard<std::mutex> lock(frame_mutex_);
+        // 旧帧如果还没被呈现线程取走，直接释放——只保留最新帧。
+        if (has_frame_) {
+          decoder_->release(latest_);
+          std::lock_guard<std::mutex> stats_lock(stats_mutex_);
+          ++stats_.frames_dropped;
+        }
+        latest_ = decoded;
+        has_frame_ = true;
+        latest_arrival_ns_ = Clock::now_ns();
+      }
+      frame_cv_.notify_one();
+    }
+  }
+
+  const auto nacks = jitter_.collect_nacks(Clock::now_ns());
+  (void)nacks;  // M2 的控制通道回传在下一步接入
+}
+
+Status Receiver::ensure_decoder(const AssembledFrame& first_frame, u32 width, u32 height) {
+  if (decoder_configured_ && width_ == width && height_ == height) {
+    return Status::Ok;
+  }
+
+  auto* d3d_decoder = dynamic_cast<D3d11vaDecoder*>(decoder_.get());
+  if (d3d_decoder == nullptr) {
+    return Status::NotSupported;
+  }
+
+  Status status = d3d_decoder->configure(
+      codec_, ByteSpan(first_frame.data.data(), first_frame.data.size()));
+  if (!ok(status)) {
+    return status;
+  }
+
+  width_ = width;
+  height_ = height;
+  decoder_configured_ = true;
+  DUO_INFO("解码器已配置: %ux%u", width, height);
+
+  if (presenter_ && config_.width != 0 && config_.height != 0) {
+    // 尺寸由调用方指定时保持窗口尺寸，否则让解码器自适应
+  }
+  return Status::Ok;
+}
+
+void Receiver::render_loop() {
+  u64 window_frames = 0;
+  u64 last_stats_ns = Clock::now_ns();
+
+  while (!stop_requested_.load(std::memory_order_acquire)) {
+    DecodedFrame frame{};
+    u64 arrival = 0;
+    {
+      std::unique_lock<std::mutex> lock(frame_mutex_);
+      frame_cv_.wait_for(lock, std::chrono::milliseconds(50),
+                         [this] { return has_frame_ || stop_requested_.load(); });
+      if (!has_frame_) {
+        continue;
+      }
+      frame = latest_;
+      arrival = latest_arrival_ns_;
+      has_frame_ = false;
+    }
+
+    const Status status = presenter_->present(frame);
+    decoder_->release(frame);
+
+    if (!ok(status) && status != Status::Closed) {
+      continue;
+    }
+
+    {
+      std::lock_guard<std::mutex> lock(stats_mutex_);
+      ++stats_.frames_presented;
+      if (arrival != 0) {
+        stats_.end_to_end_ms = Clock::to_ms(Clock::now_ns() - arrival);
+      }
+    }
+    ++window_frames;
+
+    const u64 now = Clock::now_ns();
+    if (now - last_stats_ns >= 1'000'000'000ull) {
+      const double seconds = Clock::to_ms(now - last_stats_ns) / 1000.0;
+      std::lock_guard<std::mutex> lock(stats_mutex_);
+      stats_.receive_fps = seconds > 0.0 ? static_cast<double>(window_frames) / seconds : 0.0;
+      last_stats_ns = now;
+      window_frames = 0;
+    }
+  }
+}
+
+bool Receiver::pump() {
+  if (presenter_ == nullptr) {
+    return !window_closed_.load(std::memory_order_acquire);
+  }
+  const bool alive = presenter_->pump(false);
+  if (presenter_->should_close()) {
+    window_closed_.store(true, std::memory_order_release);
+    return false;
+  }
+  return alive;
+}
+
+void Receiver::stop() {
+  if (!running_.load(std::memory_order_acquire)) {
+    return;
+  }
+
+  stop_requested_.store(true, std::memory_order_release);
+  frame_cv_.notify_all();
+
+  if (receive_thread_.joinable()) {
+    receive_thread_.join();
+  }
+  if (render_thread_.joinable()) {
+    render_thread_.join();
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(frame_mutex_);
+    if (has_frame_ && decoder_) {
+      decoder_->release(latest_);
+      has_frame_ = false;
+    }
+  }
+
+  if (decoder_) {
+    decoder_.reset();  // 必须在呈现器之前销毁：它引用了呈现器的 D3D 设备
+  }
+  presenter_.reset();
+  socket_.close();
+  running_.store(false, std::memory_order_release);
+
+  DUO_INFO("接收端已停止");
+}
+
+ReceiverStats Receiver::stats() const {
+  std::lock_guard<std::mutex> lock(stats_mutex_);
+  ReceiverStats out = stats_;
+  out.packets_recovered_by_fec = jitter_.stats().packets_recovered;
+  out.frames_dropped = std::max(out.frames_dropped, jitter_.stats().frames_dropped);
+  return out;
+}
+
+Win32Presenter* Receiver::presenter() noexcept { return presenter_.get(); }
+
+}  // namespace duo

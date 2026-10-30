@@ -6,10 +6,14 @@
 #include "duocapture/common/types.h"
 #include "duocapture/encode/encoder.h"
 
+#if defined(_WIN32)
+#include <d3d11.h>
+#endif
+
 namespace duo {
 
 struct DecodedFrame {
-  void* texture = nullptr;  // ID3D11Texture2D*，NV12
+  void* texture = nullptr;  // ID3D11Texture2D*（NV12），由解码器持有
   u32 width = 0;
   u32 height = 0;
   u64 capture_ts_ns = 0;
@@ -20,7 +24,9 @@ class IDecoder {
  public:
   virtual ~IDecoder() = default;
 
-  virtual Status configure(Codec codec) = 0;
+  // first_access_unit：用于提取 SPS/PPS 构造 MF_MT_MPEG_SEQUENCE_HEADER。
+  // 传空则跳过，某些解码器不需要它。
+  virtual Status configure(Codec codec, ByteSpan first_access_unit) = 0;
   virtual Status decode(ByteSpan access_unit, u64 capture_ts_ns, DecodedFrame& out) = 0;
   virtual void release(DecodedFrame& frame) = 0;
 
@@ -29,5 +35,42 @@ class IDecoder {
 
 // 创建硬件解码器。当前没有可用后端时返回 nullptr。
 std::unique_ptr<IDecoder> create_decoder();
+
+#if defined(_WIN32)
+
+// D3D11VA 解码器。
+//
+// 选它而不是 NVDEC 的理由：A 端不一定是 NVIDIA 显卡（推流机常见核显或
+// A 卡），D3D11VA 在所有主流 GPU 上都能用，且解码输出直接落在 D3D11
+// 纹理上，与交换链零拷贝对接。
+//
+// 实现要点：
+//   * 用 ID3D11VideoDecoder + ID3D11VideoDecoderOutputView
+//   * 输入是 Annex-B 的 H.264/HEVC 码流，需要自己切分 NAL 并构造
+//     压缩数据（DXVA 的 PicParams / SliceControl）
+//   * DPB 由驱动管理，这里只需按序提交
+class D3d11vaDecoder final : public IDecoder {
+ public:
+  D3d11vaDecoder();
+  ~D3d11vaDecoder() override;
+
+  D3d11vaDecoder(const D3d11vaDecoder&) = delete;
+  D3d11vaDecoder& operator=(const D3d11vaDecoder&) = delete;
+
+  // device 必须与呈现器使用同一个。
+  Status initialize(ID3D11Device* device, ID3D11DeviceContext* context);
+
+  Status configure(Codec codec, ByteSpan first_access_unit) override;
+  Status decode(ByteSpan access_unit, u64 capture_ts_ns, DecodedFrame& out) override;
+  void release(DecodedFrame& frame) override;
+
+  [[nodiscard]] const char* backend_name() const override;
+
+ private:
+  struct Impl;
+  std::unique_ptr<Impl> impl_;
+};
+
+#endif
 
 }  // namespace duo

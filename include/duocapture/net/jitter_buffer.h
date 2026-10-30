@@ -13,6 +13,8 @@ struct AssembledFrame {
   u32 frame_id = 0;
   u64 capture_ts_ns = 0;
   bool key = false;
+  u32 width = 0;
+  u32 height = 0;
   Bytes data;
 };
 
@@ -64,6 +66,9 @@ class JitterBuffer {
   std::size_t window_frames_;
   u32 nack_delay_ms_;
   std::map<u32, Entry> frames_;
+  // 已交付的最大 frame_id，用于丢弃延迟到达的冗余包。
+  u32 delivered_max_id_ = 0;
+  bool delivered_valid_ = false;
   JitterStats stats_{};
 };
 

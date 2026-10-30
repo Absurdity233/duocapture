@@ -6,8 +6,13 @@ namespace duo {
 
 Pacer::Pacer(u64 bytes_per_second, u64 burst_bytes)
     : bytes_per_second_(bytes_per_second == 0 ? 1 : bytes_per_second) {
+  // burst 取 100 ms 的流量。这是延迟与吞吐的折中：
+  //   * 太小（1 ms）时，一帧的包要跨多次 poll 才发完，而每次 poll 之间有
+  //     等待，有效发送速率会被压到远低于目标码率，队列越积越多
+  //   * 太大则整帧突发，打满交换机端口队列，产生毫秒级延迟尖峰
+  // 100 ms 仍然限制了单次突发上限，同时足够让一帧在 1-2 次 poll 内发完。
   burst_ = burst_bytes != 0 ? static_cast<double>(burst_bytes)
-                            : static_cast<double>(bytes_per_second_) / 1000.0;  // 1 ms
+                            : static_cast<double>(bytes_per_second_) / 10.0;
   burst_ = std::max(burst_, static_cast<double>(kMaxPacketSize * 2));
   tokens_ = burst_;
 }

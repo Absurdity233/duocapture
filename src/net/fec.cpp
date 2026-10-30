@@ -58,8 +58,11 @@ std::vector<Packet> FecCodec::encode_frame(std::vector<Packet>& packets, std::si
     check.header.payload_len = static_cast<u32>(kMaxPacketPayload);
     // 若本组包含帧的最后一个包，把它的真实载荷长度放在 reserved 里，
     // 否则恢复出的尾包无法确定该截断到哪里。
-    check.header.reserved =
+    // 低 8 位放尾包长度，高 8 位保留 codec（从数据包继承）。
+    const u16 codec_bits = static_cast<u16>(packets[begin].header.reserved & 0xFF00u);
+    const u16 tail_len =
         (end == count) ? static_cast<u16>(packets[count - 1].payload.size()) : 0;
+    check.header.reserved = static_cast<u16>(codec_bits | tail_len);
     check.payload.assign(acc.begin() + static_cast<std::ptrdiff_t>(kPacketHeaderSize), acc.end());
     parity.push_back(std::move(check));
   }
@@ -140,7 +143,7 @@ bool FecCodec::recover_one(std::vector<Packet>& packets) {
 
     const bool is_last = (pkt_index + 1 == static_cast<int>(header.pkt_count));
     const u32 payload_len =
-        is_last ? static_cast<u32>(parity_packet.header.reserved)
+        is_last ? static_cast<u32>(parity_packet.header.reserved & 0xFFu)
                 : static_cast<u32>(sibling.payload.size());
     if (payload_len > kMaxPacketPayload) {
       continue;

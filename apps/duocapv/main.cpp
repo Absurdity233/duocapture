@@ -1,11 +1,15 @@
 // duocapv —— A 端（接收机）程序。
 //
-// 当前可用：网络层自检、UDP 监听统计。
-// 解码与呈现管线在 M1 落地。
+// 用法:
+//   duocapv --selftest
+//   duocapv --monitor [端口] [秒数]
+//   duocapv --play [选项]
 
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "duocapture/common/clock.h"
@@ -14,18 +18,27 @@
 #include "duocapture/net/jitter_buffer.h"
 #include "duocapture/net/packet.h"
 #include "duocapture/net/transport.h"
+#include "duocapture/pipeline/receiver.h"
 #include "duocapture/pipeline/selftest.h"
 
 namespace {
+
+constexpr const char* kVersion = "0.2.0";
 
 void print_usage() {
   std::printf(
       "duocapv %s\n"
       "用法:\n"
       "  duocapv --selftest               运行网络层自检\n"
-      "  duocapv --monitor [端口] [秒数]  监听 UDP 并打印统计（默认 5000 端口 / 10 秒）\n"
-      "  duocapv --play <主机>            连接并呈现（M1 实现）\n",
-      "0.1.0");
+      "  duocapv --monitor [端口] [秒数]  监听 UDP 并打印统计\n"
+      "  duocapv --play [选项]            接收并呈现\n"
+      "\n"
+      "播放选项:\n"
+      "  --port <端口>       监听端口，默认 %u\n"
+      "  --width <像素>      窗口宽，默认跟随码流\n"
+      "  --height <像素>     窗口高，默认跟随码流\n"
+      "  --no-window         无窗口，只解码不显示（性能测试用）\n",
+      kVersion, static_cast<unsigned>(duo::kDefaultVideoPort));
 }
 
 int run_monitor(duo::u16 port, double seconds) {
@@ -80,6 +93,11 @@ int run_monitor(duo::u16 port, double seconds) {
     packet.payload.assign(payload.begin(), payload.end());
     jitter.insert(std::move(packet));
 
+    // monitor 模式也要消费，否则窗口会被填满、组装统计永远是 0。
+    duo::AssembledFrame assembled;
+    while (jitter.try_pop(assembled)) {
+    }
+
     const duo::u64 now = duo::Clock::now_ns();
     if (now - last_report >= 1'000'000'000ull) {
       std::printf("[%s:%u] 包=%llu/s  累计=%llu  帧组装=%llu  FEC恢复=%llu  待组装帧=%zu\n",
@@ -103,6 +121,59 @@ int run_monitor(duo::u16 port, double seconds) {
       static_cast<unsigned long long>(jitter.stats().packets_recovered));
 
   return datagrams > 0 ? 0 : 1;
+}
+
+int run_play(int argc, char** argv) {
+  duo::ReceiverConfig config;
+
+  for (int i = 2; i < argc; ++i) {
+    const std::string arg = argv[i];
+    const bool has_next = i + 1 < argc;
+
+    if (arg == "--port" && has_next) {
+      config.listen_port = static_cast<duo::u16>(std::atoi(argv[++i]));
+    } else if (arg == "--width" && has_next) {
+      config.width = static_cast<duo::u32>(std::atoi(argv[++i]));
+    } else if (arg == "--height" && has_next) {
+      config.height = static_cast<duo::u32>(std::atoi(argv[++i]));
+    } else if (arg == "--no-window") {
+      config.show_window = false;
+    }
+  }
+
+  duo::Receiver receiver;
+  duo::Status status = receiver.start(config);
+  if (!duo::ok(status)) {
+    std::printf("启动接收端失败: %s\n", duo::to_string(status));
+    return 1;
+  }
+
+  std::printf("接收中，关闭窗口或 Ctrl+C 停止\n");
+
+  auto last_report = std::chrono::steady_clock::now();
+  while (receiver.running()) {
+    if (config.show_window && !receiver.pump()) {
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(4));
+
+    const auto now = std::chrono::steady_clock::now();
+    if (now - last_report >= std::chrono::seconds(1)) {
+      const duo::ReceiverStats stats = receiver.stats();
+      std::printf("收包 %llu  组装 %llu  呈现 %llu  丢帧 %llu  FEC恢复 %llu  解码错误 %llu  %.1f fps  端到端 %.1f ms\n",
+                  static_cast<unsigned long long>(stats.datagrams_received),
+                  static_cast<unsigned long long>(stats.frames_assembled),
+                  static_cast<unsigned long long>(stats.frames_presented),
+                  static_cast<unsigned long long>(stats.frames_dropped),
+                  static_cast<unsigned long long>(stats.packets_recovered_by_fec),
+                  static_cast<unsigned long long>(stats.decoder_errors), stats.receive_fps,
+                  stats.end_to_end_ms);
+      last_report = now;
+    }
+  }
+
+  receiver.stop();
+  return 0;
 }
 
 }  // namespace
@@ -129,8 +200,7 @@ int main(int argc, char** argv) {
     return run_monitor(port, seconds > 0.0 ? seconds : 10.0);
   }
   if (mode == "--play") {
-    std::printf("解码与呈现管线将在 M1 实现（NVDEC → 交换链）。\n");
-    return 1;
+    return run_play(argc, argv);
   }
 
   print_usage();
