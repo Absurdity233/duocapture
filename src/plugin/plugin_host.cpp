@@ -1,5 +1,6 @@
 #include "duocapture/plugin/plugin_host.h"
 
+#include <cstddef>
 #include <cstring>
 
 #include "duocapture/common/log.h"
@@ -19,6 +20,9 @@
 
 namespace duo {
 namespace {
+
+// 每帧最多带给宿主多少个框。超出部分丢弃——这是叠加显示，不是数据通道。
+constexpr int kMaxOverlayBoxes = 128;
 
 // ---- 跨平台动态库薄封装 ------------------------------------------------
 struct DynLib {
@@ -151,7 +155,11 @@ struct PluginHost::Loaded {
 
 PluginHost::AnalysisAdapter::AnalysisAdapter(std::string name, const DuoAnalysisPlugin* api,
                                             void* instance, void (*destroy_fn)(void*))
-    : plugin_name_(std::move(name)), api_(api), instance_(instance), destroy_fn_(destroy_fn) {}
+    : plugin_name_(std::move(name)),
+      api_(api),
+      instance_(instance),
+      destroy_fn_(destroy_fn),
+      api_struct_size_(api != nullptr ? api->struct_size : 0) {}
 
 PluginHost::AnalysisAdapter::~AnalysisAdapter() {
   if (destroy_fn_ != nullptr && instance_ != nullptr) {
@@ -180,6 +188,35 @@ void PluginHost::AnalysisAdapter::frame_thunk(void* user, const DecodedFrame& fr
   } else {
     ++self->frames_failed_;
   }
+
+  // 顺手抓一份检测框给呈现线程。用 struct_size 判断插件是否提供该字段：
+  // 老插件的 struct 到 destroy 为止，读 get_overlay_boxes 会越界。
+  constexpr unsigned int kOverlayFieldEnd = static_cast<unsigned int>(
+      offsetof(DuoAnalysisPlugin, get_overlay_boxes) + sizeof(void*));
+  if (self->api_struct_size_ < kOverlayFieldEnd || self->api_->get_overlay_boxes == nullptr) {
+    return;
+  }
+
+  DuoOverlayBox boxes[kMaxOverlayBoxes];
+  const int count = self->api_->get_overlay_boxes(self->instance_, boxes, kMaxOverlayBoxes);
+  const int clamped = count < 0 ? 0 : (count > kMaxOverlayBoxes ? kMaxOverlayBoxes : count);
+
+  std::lock_guard<std::mutex> lock(self->overlay_mutex_);
+  self->overlay_boxes_.assign(boxes, boxes + clamped);
+}
+
+int PluginHost::AnalysisAdapter::copy_overlay_boxes(DuoOverlayBox* out, int max_boxes) const {
+  if (out == nullptr || max_boxes <= 0) {
+    return 0;
+  }
+  std::lock_guard<std::mutex> lock(overlay_mutex_);
+  const int count =
+      static_cast<int>(overlay_boxes_.size()) > max_boxes ? max_boxes
+                                                          : static_cast<int>(overlay_boxes_.size());
+  for (int i = 0; i < count; ++i) {
+    out[i] = overlay_boxes_[static_cast<std::size_t>(i)];
+  }
+  return count;
 }
 
 void PluginHost::AnalysisAdapter::reset() {

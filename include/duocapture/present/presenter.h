@@ -5,6 +5,7 @@
 
 #include "duocapture/common/status.h"
 #include "duocapture/decode/decoder.h"
+#include "duocapture/present/box_overlay.h"
 #include "duocapture/present/telemetry_overlay.h"
 
 #if defined(_WIN32)
@@ -62,6 +63,12 @@ class Win32Presenter final : public IPresenter {
   // 遥测叠加层（可选）。传入 nullptr 关闭。
   TelemetryOverlay* overlay() noexcept;
   void set_overlay(TelemetryOverlay* overlay) noexcept;
+
+  // 检测框叠加层回调（可选）。present() 在 Blt 之后、Present 之前调用它，
+  // 传进来的后备缓冲可以直接往上画。
+  using FrameOverlayFn = void (*)(void* user, ID3D11Texture2D* back_buffer, u32 width,
+                                  u32 height);
+  void set_frame_overlay(FrameOverlayFn fn, void* user) noexcept;
 
  private:
   Status create_swapchain();

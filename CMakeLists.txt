@@ -75,6 +75,7 @@ if(WIN32)
     src/decode/nvdec_cuvid.cpp
     src/present/swapchain_presenter.cpp
     src/present/telemetry_overlay.cpp
+  src/present/box_overlay.cpp
     src/audio/wasapi_loopback.cpp
     src/audio/aac_encoder.cpp
     src/audio/aac_decoder.cpp

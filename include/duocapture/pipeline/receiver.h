@@ -21,6 +21,7 @@
 #include "duocapture/audio/aac_decoder.h"
 #include "duocapture/audio/wasapi_render.h"
 #include "duocapture/pipeline/analysis_tap.h"
+#include "duocapture/present/box_overlay.h"
 #include "duocapture/present/presenter.h"
 
 namespace duo {
@@ -109,7 +110,13 @@ class Receiver {
 
   // 用插件适配器替代内建回调。传入后 enable_analysis 自动打开。
   // 适配器由调用方持有，生命周期必须覆盖 Receiver。
-  void set_analysis_plugin(void* adapter, AnalysisTap::Callback thunk, void* user);
+  // 若适配器支持检测框上报，Receiver 会把框合成到呈现画面上。
+  using OverlayBoxFetchFn = int (*)(void* user, DuoOverlayBox* out, int max_boxes);
+  void set_analysis_plugin(void* adapter, AnalysisTap::Callback thunk, void* user,
+                           OverlayBoxFetchFn boxes_fetch = nullptr);
+
+  // 检测框叠加的开关（默认开）。只在 set_analysis_plugin 后有效。
+  void set_boxes_overlay_enabled(bool enabled) noexcept { boxes_overlay_enabled_ = enabled; }
 
   // 呈现器建好后回调，用于把 D3D 设备交给插件。
   void set_device_ready_callback(void (*fn)(void* user, void* device, void* context), void* user);
@@ -136,6 +143,14 @@ class Receiver {
   void* analysis_user_ = nullptr;
   RollingStats latency_stats_{600};
   TelemetryOverlay overlay_;
+  BoxOverlay box_overlay_;
+
+  // 检测框来源：适配器的紧凑回调 + 它的 this。呈现线程通过它取最新框。
+  static void draw_detection_boxes(void* user, ID3D11Texture2D* back_buffer, u32 width,
+                                   u32 height);
+  OverlayBoxFetchFn boxes_fetch_ = nullptr;
+  void* boxes_fetch_user_ = nullptr;
+  bool boxes_overlay_enabled_ = true;
 
   // 音频：按 frame_id 攒包，齐了就解
   AacDecoder audio_decoder_;

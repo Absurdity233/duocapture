@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -77,7 +78,12 @@ class PluginHost {
 // 把插件实例适配成 AnalysisTap 能用的回调。
 //
 // 职责：持有插件实例、把 DecodedFrame 翻译成 DuoFrameView、
-// 转发 on_reset / destroy。生命周期由 shared_ptr 管理。
+// 转发 on_reset / destroy、以及在插件提供 get_overlay_boxes 时
+// 缓存一份检测框快照供呈现线程取用。
+//
+// 线程模型：on_frame 在分析线程跑，抓取检测框；呈现线程通过
+// copy_overlay_boxes 拿快照。两边用互斥锁交换整个数组（几十个框，
+// 拷贝成本可忽略），插件内部的检测数据不必加锁。
 class PluginHost::AnalysisAdapter {
  public:
   ~AnalysisAdapter();
@@ -94,6 +100,15 @@ class PluginHost::AnalysisAdapter {
   [[nodiscard]] u64 frames_ok() const noexcept { return frames_ok_; }
   [[nodiscard]] u64 frames_failed() const noexcept { return frames_failed_; }
 
+  // 呈现线程用：把最近一帧的检测框拷贝到 out（最多 max_boxes），
+  // 返回拷贝的个数。没有可画内容时返回 0。
+  int copy_overlay_boxes(DuoOverlayBox* out, int max_boxes) const;
+
+  // 与 copy_overlay_boxes 同签名，供 Receiver 当成 C 回调注册。
+  [[nodiscard]] static int overlay_boxes_thunk(void* user, DuoOverlayBox* out, int max_boxes) {
+    return static_cast<const AnalysisAdapter*>(user)->copy_overlay_boxes(out, max_boxes);
+  }
+
  private:
   friend class PluginHost;
   AnalysisAdapter(std::string name, const DuoAnalysisPlugin* api, void* instance,
@@ -105,6 +120,13 @@ class PluginHost::AnalysisAdapter {
   void (*destroy_fn_)(void*) = nullptr;
   u64 frames_ok_ = 0;
   u64 frames_failed_ = 0;
+
+  // 主程序看到的函数表大小。只有 >= 含 get_overlay_boxes 的版本才去读该字段，
+  // 否则读到的会是插件 struct 之外的内存。
+  unsigned int api_struct_size_ = 0;
+
+  mutable std::mutex overlay_mutex_;
+  std::vector<DuoOverlayBox> overlay_boxes_;
 };
 
 }  // namespace duo

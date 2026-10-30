@@ -221,7 +221,8 @@ int run_play(int argc, char** argv) {
         },
         &plugin_host);
     receiver.set_analysis_plugin(adapter.get(), &duo::PluginHost::AnalysisAdapter::frame_thunk,
-                                 adapter->user_ptr());
+                                 adapter->user_ptr(),
+                                 &duo::PluginHost::AnalysisAdapter::overlay_boxes_thunk);
   } else if (config.enable_analysis) {
     receiver.set_analysis_callback(&sample_analyze, &analyzed);
   }

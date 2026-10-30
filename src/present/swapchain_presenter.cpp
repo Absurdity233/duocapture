@@ -79,6 +79,8 @@ struct Win32Presenter::Impl {
   u32 output_width = 0;
   u32 output_height = 0;
   TelemetryOverlay* overlay = nullptr;
+  Win32Presenter::FrameOverlayFn frame_overlay = nullptr;
+  void* frame_overlay_user = nullptr;
 };
 
 Win32Presenter::Win32Presenter() : impl_(std::make_unique<Impl>()) {}
@@ -332,7 +334,11 @@ Status Win32Presenter::present(const DecodedFrame& frame) {
   }
   impl_->context->CopyResource(back_buffer.Get(), impl_->output_texture.Get());
 
-  // 遥测叠加层画在后备缓冲上，这样它不会被视频处理器覆盖
+  // 叠加层画在后备缓冲上，这样它不会被视频处理器覆盖。
+  // 先画检测框（它是全画布半透明），再画遥测文字（左上角小块）。
+  if (impl_->frame_overlay != nullptr) {
+    impl_->frame_overlay(impl_->frame_overlay_user, back_buffer.Get(), width_, height_);
+  }
   if (impl_->overlay != nullptr) {
     impl_->overlay->draw(back_buffer.Get(), width_, height_);
   }
@@ -411,6 +417,11 @@ TelemetryOverlay* Win32Presenter::overlay() noexcept { return impl_->overlay; }
 
 void Win32Presenter::set_overlay(TelemetryOverlay* overlay) noexcept {
   impl_->overlay = overlay;
+}
+
+void Win32Presenter::set_frame_overlay(FrameOverlayFn fn, void* user) noexcept {
+  impl_->frame_overlay = fn;
+  impl_->frame_overlay_user = user;
 }
 
 ID3D11Device* Win32Presenter::device() const noexcept { return impl_->device.Get(); }

@@ -14,6 +14,9 @@ namespace {
 constexpr u32 kRecvBufferSize = 16u * 1024u * 1024u;
 constexpr u32 kMaxDatagram = 2048;
 
+// 每帧最多绘制的框数。与 plugin_host 的上限保持一致。
+constexpr int kMaxOverlayBoxes = 128;
+
 }  // namespace
 
 Receiver::Receiver() : jitter_(8, 3) {}
@@ -69,6 +72,15 @@ Status Receiver::start(const ReceiverConfig& config) {
       DUO_ERROR("创建呈现窗口失败: %s", to_string(status));
       socket_.close();
       return status;
+    }
+
+    // 检测框叠加层独立于遥测 overlay：开关不同、绘制内容不同。
+    const Status bs = box_overlay_.initialize(presenter_->device(), presenter_->context());
+    if (ok(bs)) {
+      box_overlay_.set_enabled(boxes_overlay_enabled_);
+      presenter_->set_frame_overlay(&Receiver::draw_detection_boxes, this);
+    } else {
+      DUO_WARN("检测框叠加初始化失败: %s", to_string(bs));
     }
 
     if (config_.show_overlay) {
@@ -533,12 +545,33 @@ void Receiver::set_device_ready_callback(void (*fn)(void* user, void* device, vo
   device_ready_user_ = user;
 }
 
-void Receiver::set_analysis_plugin(void* adapter, AnalysisTap::Callback thunk, void* user) {
+void Receiver::set_analysis_plugin(void* adapter, AnalysisTap::Callback thunk, void* user,
+                                   OverlayBoxFetchFn boxes_fetch) {
   (void)adapter;
   analysis_callback_ = thunk;
   analysis_user_ = user;
   config_.enable_analysis = true;
   analysis_forced_ = true;
+  boxes_fetch_ = boxes_fetch;
+  boxes_fetch_user_ = user;
+}
+
+void Receiver::draw_detection_boxes(void* user, ID3D11Texture2D* back_buffer, u32 width,
+                                    u32 height) {
+  auto* self = static_cast<Receiver*>(user);
+  if (self == nullptr || !self->boxes_overlay_enabled_ || self->boxes_fetch_ == nullptr) {
+    return;
+  }
+
+  DuoOverlayBox boxes[kMaxOverlayBoxes];
+  const int count = self->boxes_fetch_(self->boxes_fetch_user_, boxes, kMaxOverlayBoxes);
+  if (count <= 0) {
+    return;
+  }
+  // 框的坐标以解码帧为基准，窗口尺寸可能不同（视频处理器会拉伸）。
+  const u32 src_w = self->width_ != 0 ? self->width_ : width;
+  const u32 src_h = self->height_ != 0 ? self->height_ : height;
+  self->box_overlay_.draw(back_buffer, width, height, boxes, count, src_w, src_h);
 }
 
 }  // namespace duo

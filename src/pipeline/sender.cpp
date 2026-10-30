@@ -1,5 +1,7 @@
 #include "duocapture/pipeline/sender.h"
 
+#include "duocapture/decode/sps_parser.h"
+
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
@@ -266,6 +268,21 @@ void Sender::capture_loop() {
     const u8 first_nal = data[starts.front() + 4];
     const bool h264 = (first_nal & 0x1F) == 7 || (first_nal & 0x1F) == 5;
 
+    // 回放不走采集，width_/height_ 还是 0，包头里就会带 0x0，
+    // 接收端拿不到尺寸（表现为 "解码器已配置: 0x0" 后不再出帧）。
+    // 从 SPS 里直接解析。
+    {
+      const ByteSpan stream(codec_bytes, data.size());
+      const SpsInfo sps = parse_sps_dimensions(stream, h264 ? Codec::H264 : Codec::Hevc);
+      if (sps.valid && sps.width != 0 && sps.height != 0) {
+        width_ = sps.width;
+        height_ = sps.height;
+        DUO_INFO("回放分辨率: %ux%u", width_, height_);
+      } else {
+        DUO_WARN("回放流里解析不出 SPS 分辨率，接收端可能无法解码");
+      }
+    }
+
     Packetizer packetizer;
     const auto frame_interval = std::chrono::milliseconds(
         config_.playback_fps == 0 ? 50 : 1000 / config_.playback_fps);
@@ -288,12 +305,19 @@ void Sender::capture_loop() {
 
       // 第一帧带上 SPS/PPS（accumulated_begin == 0），后续每帧独立。
       const std::size_t frame_begin = key_pending ? accumulated_begin : begin;
-      key_pending = false;
 
       FrameMeta meta{};
       meta.frame_id = next_frame_id_++;
       meta.capture_ts_ns = Clock::now_ns();
-      meta.key = (k == 0) || h264 ? (header & 0x1F) == 5 : (((header >> 1) & 0x3F) == 19);
+      // 括号不能省：`k == 0 || h264 ? A : B` 会被解析成 `(k == 0 || h264) ? A : B`，
+      // 于是 HEVC 也拿 H.264 的条件来判断，回放永远标不出关键帧。
+      const bool is_idr =
+          h264 ? ((header & 0x1F) == 5) : (((header >> 1) & 0x3F) == 19);
+      // 注意不能用 `k == 0`：k 是 NAL 下标，前面的 VPS/SPS/PPS 被
+      // `if (!is_vcl) continue` 跳过后，第一个 VCL 的 k 已经是 3 了。
+      // 用 key_pending 表示「这是回放的第一帧」。
+      meta.key = key_pending || is_idr;
+      key_pending = false;
       meta.codec = h264 ? 0 : 1;
       meta.width = width_;
       meta.height = height_;

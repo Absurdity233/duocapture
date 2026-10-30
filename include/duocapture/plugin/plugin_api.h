@@ -79,6 +79,18 @@ typedef struct DuoPluginHostServices {
 
 // ---- 分析插件 --------------------------------------------------------------
 
+// 插件上报的一个检测框（像素坐标，相对于**原始解码帧**）。
+//
+// 主程序把它合成到呈现表面，所以插件只负责算坐标，不碰纹理——
+// 分析线程和呈现线程共用同一张解码纹理，插件直接往上画会和呈现打架。
+typedef struct DuoOverlayBox {
+  float x1, y1, x2, y2;  // 原始帧像素坐标
+  float score;           // 0..1
+  int class_id;
+  unsigned int color;    // 0xAARRGGBB；0 = 让宿主按类别自动配色
+  unsigned int reserved;
+} DuoOverlayBox;
+
 // 分析插件的函数表。instance 是 create 返回的不透明指针。
 typedef struct DuoAnalysisPlugin {
   unsigned int abi_version;
@@ -100,6 +112,18 @@ typedef struct DuoAnalysisPlugin {
 
   // 销毁实例。主程序卸载插件前一定会调用。
   void (*destroy)(void* instance);
+
+  // ---- 以下为 ABI 1 之后新增的字段 ------------------------------------
+  //
+  // 靠 struct_size 做单向校验：老插件 struct_size 小，主程序不会读这些
+  // 字段；新插件在大 struct 上填好它们，老主程序读不到但也不会崩。
+  // 因此加这些字段不需要升 DUO_PLUGIN_ABI_VERSION。
+
+  // 取本帧要叠加的检测框。返回写入 out_boxes 的个数（最多 max_boxes），
+  // 返回 0 表示这一帧不画。在**呈现线程**里调用，允许为 NULL。
+  //
+  // 指针只在本次调用内有效，主程序不会保存。
+  int (*get_overlay_boxes)(void* instance, DuoOverlayBox* out_boxes, int max_boxes);
 } DuoAnalysisPlugin;
 
 // ---- 插件描述符 ------------------------------------------------------------
