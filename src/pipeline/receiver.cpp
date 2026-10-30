@@ -66,6 +66,13 @@ Status Receiver::start(const ReceiverConfig& config) {
     }
   }
 
+  if (config_.enable_analysis && analysis_callback_ != nullptr) {
+    const Status as = analysis_.start(analysis_callback_, analysis_user_);
+    if (!ok(as)) {
+      DUO_WARN("分析 tap 启动失败: %s", to_string(as));
+    }
+  }
+
   running_.store(true, std::memory_order_release);
   receive_thread_ = std::thread([this] { receive_loop(); });
   if (presenter_) {
@@ -180,6 +187,12 @@ void Receiver::receive_loop() {
         latest_ = decoded;
         has_frame_ = true;
         latest_arrival_ns_ = Clock::now_ns();
+
+        // 分析 tap 与呈现完全独立：它只拿纹理指针，忙则丢帧，
+        // 不会拖慢解码线程。
+        if (config_.enable_analysis) {
+          analysis_.submit(decoded);
+        }
       }
       frame_cv_.notify_one();
     }
@@ -241,7 +254,9 @@ void Receiver::render_loop() {
       std::lock_guard<std::mutex> lock(stats_mutex_);
       ++stats_.frames_presented;
       if (arrival != 0) {
-        stats_.end_to_end_ms = Clock::to_ms(Clock::now_ns() - arrival);
+        const double e2e = Clock::to_ms(Clock::now_ns() - arrival);
+        stats_.end_to_end_ms = e2e;
+        latency_stats_.add(e2e);
       }
     }
     ++window_frames;
@@ -292,6 +307,8 @@ void Receiver::stop() {
     }
   }
 
+  analysis_.stop();
+
   if (decoder_) {
     decoder_.reset();  // 必须在呈现器之前销毁：它引用了呈现器的 D3D 设备
   }
@@ -307,9 +324,18 @@ ReceiverStats Receiver::stats() const {
   ReceiverStats out = stats_;
   out.packets_recovered_by_fec = jitter_.stats().packets_recovered;
   out.frames_dropped = std::max(out.frames_dropped, jitter_.stats().frames_dropped);
+  out.frames_analyzed = analysis_.frames_analyzed();
+  out.frames_analysis_dropped = analysis_.frames_dropped();
+  out.p50_end_to_end_ms = latency_stats_.percentile(0.5);
+  out.p99_end_to_end_ms = latency_stats_.percentile(0.99);
   return out;
 }
 
 Win32Presenter* Receiver::presenter() noexcept { return presenter_.get(); }
+
+void Receiver::set_analysis_callback(AnalysisTap::Callback callback, void* user) {
+  analysis_callback_ = callback;
+  analysis_user_ = user;
+}
 
 }  // namespace duo

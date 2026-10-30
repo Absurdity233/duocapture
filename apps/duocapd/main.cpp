@@ -155,6 +155,10 @@ int run_stream(int argc, char** argv) {
       config.record_path = argv[++i];
     } else if (arg == "--playback" && has_next) {
       config.playback_path = argv[++i];
+    } else if (arg == "--audio") {
+      config.capture_audio = true;
+    } else if (arg == "--audio-bitrate" && has_next) {
+      config.audio_bitrate_bps = static_cast<duo::u32>(std::atof(argv[++i]) * 1000);
     } else if (arg == "--ddapi") {
       config.prefer_wgc = false;
     }

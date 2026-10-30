@@ -39,6 +39,9 @@ Status Sender::start(const SenderConfig& config) {
   running_.store(true, std::memory_order_release);
   capture_thread_ = std::thread([this] { capture_loop(); });
   send_thread_ = std::thread([this] { send_loop(); });
+  if (config_.capture_audio) {
+    audio_thread_ = std::thread([this] { audio_loop(); });
+  }
 
   DUO_INFO("发送端已启动: %ux%u @%u, %u Mbps, -> %s:%u",
            width_, height_, config_.fps, config_.bitrate_bps / 1'000'000,
@@ -145,12 +148,52 @@ Status Sender::setup_pipeline() {
   pacer_ = Pacer(bytes_per_second);
 
   // 调试用：把编码后的裸码流落盘，方便离线验证解码器。
-  if (!config_.record_path.empty()) {
-    record_.open(config_.record_path, std::ios::binary | std::ios::trunc);
-    if (record_) {
-      DUO_INFO("码流录制到 %s", config_.record_path.c_str());
+  // 音频：采集系统声音 → AAC → 混入录制
+  if (config_.capture_audio) {
+    const Status as = audio_capture_.start(-1);
+    if (!ok(as)) {
+      DUO_WARN("音频采集启动失败: %s（继续无声录制）", to_string(as));
+      config_.capture_audio = false;
     } else {
-      DUO_WARN("无法打开录制文件 %s", config_.record_path.c_str());
+      const AudioFormat& af = audio_capture_.format();
+      const Status es = audio_encoder_.open(af.sample_rate, af.channels, config_.audio_bitrate_bps);
+      if (!ok(es)) {
+        DUO_WARN("AAC 编码器启动失败: %s（继续无声录制）", to_string(es));
+        audio_capture_.stop();
+        config_.capture_audio = false;
+      }
+    }
+  }
+
+  if (!config_.record_path.empty()) {
+    const Status rs = muxer_.open(config_.record_path, config_.codec, width_, height_, config_.fps);
+    if (ok(rs)) {
+      DUO_INFO("录制到 %s（零转码 MKV）", config_.record_path.c_str());
+      // 音轨必须在第一帧之前启用（轨道头是一次性写死的）
+      if (config_.capture_audio && audio_encoder_.is_open()) {
+        const AudioFormat& af = audio_capture_.format();
+        // AudioSpecificConfig: 5 bits object type + 4 bits freq index + 4 bits channels
+        static const int kRates[] = {96000, 88200, 64000, 48000, 44100, 32000, 24000,
+                                     22050, 16000, 12000, 11025, 8000,  7350};
+        int freq_index = 3;  // 48kHz
+        for (int i = 0; i < 13; ++i) {
+          if (kRates[i] == static_cast<int>(af.sample_rate)) {
+            freq_index = i;
+            break;
+          }
+        }
+        const int object_type = 2;  // AAC-LC
+        const int chan_cfg = af.channels == 1 ? 1 : 2;
+        Bytes asc;
+        asc.push_back(static_cast<u8>((object_type << 3) | ((freq_index >> 1) & 0x7)));
+        asc.push_back(static_cast<u8>(((freq_index & 0x1) << 7) | ((chan_cfg & 0xF) << 3)));
+        const Status ms = muxer_.enable_audio(af.sample_rate, af.channels, asc);
+        if (!ok(ms)) {
+          DUO_WARN("启用音轨失败: %s", to_string(ms));
+        }
+      }
+    } else {
+      DUO_WARN("无法打开录制文件 %s: %s", config_.record_path.c_str(), to_string(rs));
     }
   }
 
@@ -334,9 +377,17 @@ void Sender::capture_loop() {
       continue;
     }
 
-    if (record_.is_open()) {
-      record_.write(reinterpret_cast<const char*>(encoded.data.data()),
-                    static_cast<std::streamsize>(encoded.data.size()));
+    // 音频时间轴以第一个视频帧为锚点
+    if (audio_anchor_ns_.load(std::memory_order_acquire) == 0) {
+      audio_anchor_ns_.store(encoded.capture_ts_ns, std::memory_order_release);
+    }
+
+    if (muxer_.is_open()) {
+      const Status rs = muxer_.write_frame(
+          ByteSpan(encoded.data.data(), encoded.data.size()), encoded.capture_ts_ns, encoded.key);
+      if (!ok(rs)) {
+        DUO_WARN("写 MKV 失败: %s", to_string(rs));
+      }
     }
 
     FrameMeta meta{};
@@ -410,6 +461,51 @@ void Sender::capture_loop() {
   (void)device;
 }
 
+void Sender::audio_loop() {
+  std::vector<float> pcm_f;
+  std::vector<i16> pcm_s16;
+  std::vector<Bytes> aac_frames;
+
+  // 音频时间轴按「已采集的采样数」推算，不用墙上时间。
+  // 声卡时钟和系统时钟本来就有漂移，用墙上时间会让音画越走越偏；
+  // 按采样数算是声卡自己的时间，与视频的 QPC 时间轴对齐后只差一个
+  // 固定偏移，不会累积误差。
+  u64 samples_consumed = 0;
+  u32 sample_rate = 0;
+  if (audio_encoder_.is_open()) {
+    sample_rate = audio_encoder_.sample_rate();
+  }
+
+  while (!stop_requested_.load(std::memory_order_acquire)) {
+    if (!audio_capture_.read(pcm_f, 10) || pcm_f.empty()) {
+      continue;
+    }
+    WasapiLoopback::to_s16(pcm_f, pcm_s16);
+    const Status st = audio_encoder_.encode(
+        ByteSpan(reinterpret_cast<const u8*>(pcm_s16.data()), pcm_s16.size() * sizeof(i16)),
+        aac_frames);
+    if (!ok(st)) {
+      DUO_WARN("AAC 编码失败: %s", to_string(st));
+      continue;
+    }
+
+    const u64 anchor = audio_anchor_ns_.load(std::memory_order_acquire);
+    const u32 rate = sample_rate != 0 ? sample_rate : 48000;
+
+    for (const Bytes& frame : aac_frames) {
+      // 每帧 AAC 固定 1024 采样。按累计采样数算时间戳，
+      // 与视频的 QPC 时间轴只差一个固定偏移。
+      const u64 ts_ns = anchor + samples_consumed * 1'000'000'000ull / rate;
+      samples_consumed += 1024;
+
+      if (muxer_.is_open() && anchor != 0) {
+        muxer_.write_audio(ByteSpan(frame.data(), frame.size()), ts_ns);
+      }
+      // TODO: 网络传输音频（M3 后半段）
+    }
+  }
+}
+
 void Sender::send_loop() {
   std::vector<Packet> batch;
   std::vector<u8> wire;
@@ -477,6 +573,11 @@ void Sender::stop() {
   if (send_thread_.joinable()) {
     send_thread_.join();
   }
+  if (audio_thread_.joinable()) {
+    audio_thread_.join();
+  }
+  audio_encoder_.close();
+  audio_capture_.stop();
 
   if (capture_) {
     capture_->stop();
@@ -484,8 +585,8 @@ void Sender::stop() {
   }
   converter_.shutdown();
   encoder_.reset();
-  if (record_.is_open()) {
-    record_.close();
+  if (muxer_.is_open()) {
+    muxer_.close();
   }
   socket_.close();
   running_.store(false, std::memory_order_release);

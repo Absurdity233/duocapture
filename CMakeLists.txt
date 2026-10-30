@@ -39,7 +39,11 @@ add_library(duocore STATIC
   src/decode/sps_parser.cpp
   src/decode/nvdec_cuvid.cpp
   src/present/swapchain_presenter.cpp
+  src/audio/wasapi_loopback.cpp
+  src/audio/aac_encoder.cpp
+  src/record/mkv_muxer.cpp
   src/pipeline/sender.cpp
+  src/pipeline/analysis_tap.cpp
   src/pipeline/receiver.cpp
   src/pipeline/selftest.cpp
 )
@@ -104,6 +108,7 @@ if(DUO_BUILD_TESTS)
     tests/test_main.cpp
     tests/net_tests.cpp
     tests/sps_tests.cpp
+    tests/pipeline_tests.cpp
   )
   target_link_libraries(duo_tests PRIVATE duocore)
   add_test(NAME duo_tests COMMAND duo_tests)

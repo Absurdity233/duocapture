@@ -1,7 +1,6 @@
 #pragma once
 
 #include <atomic>
-#include <fstream>
 #include <condition_variable>
 #include <memory>
 #include <mutex>
@@ -18,6 +17,9 @@
 #include "duocapture/net/pacer.h"
 #include "duocapture/net/packet.h"
 #include "duocapture/net/transport.h"
+#include "duocapture/audio/aac_encoder.h"
+#include "duocapture/audio/wasapi_loopback.h"
+#include "duocapture/record/mkv_muxer.h"
 
 namespace duo {
 
@@ -40,8 +42,13 @@ struct SenderConfig {
   // 限速：默认按目标码率再留 20% 余量，够 FEC 和包头开销。
   u64 pacer_bytes_per_second = 0;
 
-  // 录到本地文件（M3 之前的调试手段，零转码直接写 Annex-B 裸流）。
+  // 录到本地 MKV。零转码：直接把编码器输出封装进容器，不重编码。
+  // 空字符串表示不录制。
   std::string record_path;
+
+  // 是否采集系统声音（WASAPI 环回）并混入录制/传输。
+  bool capture_audio = false;
+  u32 audio_bitrate_bps = 128'000;
 
   // 调试用：从 Annex-B 裸流回放（不采集、不编码），用于在没有持续
   // 画面来源时验证传输/解码/呈现链路。
@@ -84,6 +91,7 @@ class Sender {
 
  private:
   void capture_loop();
+  void audio_loop();
   void send_loop();
   Status setup_pipeline();
 
@@ -97,7 +105,12 @@ class Sender {
   UdpSocket socket_;
   Pacer pacer_;
 
-  std::ofstream record_;
+  MkvMuxer muxer_;
+  WasapiLoopback audio_capture_;
+  AacEncoder audio_encoder_;
+  std::thread audio_thread_;
+  // 音频时间轴锚点：第一个视频帧的采集时间戳，音频按它对齐。
+  std::atomic<u64> audio_anchor_ns_{0};
   std::thread capture_thread_;
   std::thread send_thread_;
 

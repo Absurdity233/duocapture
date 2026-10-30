@@ -5,6 +5,7 @@
 //   duocapv --monitor [端口] [秒数]
 //   duocapv --play [选项]
 
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -123,6 +124,27 @@ int run_monitor(duo::u16 port, double seconds) {
   return datagrams > 0 ? 0 : 1;
 }
 
+// 示例分析回调：统计纹理的亮度均值。真实场景会换成
+// TensorRT / DirectML 推理。这里故意做一点计算，模拟 CV 负载。
+void sample_analyze(void* user, const duo::DecodedFrame& frame) {
+  auto* counter = static_cast<std::atomic<duo::u64>*>(user);
+  if (counter != nullptr) {
+    counter->fetch_add(1, std::memory_order_relaxed);
+  }
+  if (frame.texture == nullptr) {
+    return;
+  }
+  // 模拟 CV 处理开销。默认 1ms（轻负载，跟得上 20fps）；
+  // 环境变量 DUO_ANALYZE_MS 可以调大，用来验证「忙则丢帧」语义。
+  static const int analyze_ms = [] {
+    const char* env = std::getenv("DUO_ANALYZE_MS");
+    return env != nullptr ? std::atoi(env) : 1;
+  }();
+  if (analyze_ms > 0) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(analyze_ms));
+  }
+}
+
 int run_play(int argc, char** argv) {
   duo::ReceiverConfig config;
 
@@ -138,10 +160,16 @@ int run_play(int argc, char** argv) {
       config.height = static_cast<duo::u32>(std::atoi(argv[++i]));
     } else if (arg == "--no-window") {
       config.show_window = false;
+    } else if (arg == "--analyze") {
+      config.enable_analysis = true;
     }
   }
 
   duo::Receiver receiver;
+  std::atomic<duo::u64> analyzed{0};
+  if (config.enable_analysis) {
+    receiver.set_analysis_callback(&sample_analyze, &analyzed);
+  }
   duo::Status status = receiver.start(config);
   if (!duo::ok(status)) {
     std::printf("启动接收端失败: %s\n", duo::to_string(status));
@@ -160,14 +188,16 @@ int run_play(int argc, char** argv) {
     const auto now = std::chrono::steady_clock::now();
     if (now - last_report >= std::chrono::seconds(1)) {
       const duo::ReceiverStats stats = receiver.stats();
-      std::printf("收包 %llu  组装 %llu  呈现 %llu  丢帧 %llu  FEC恢复 %llu  解码错误 %llu  %.1f fps  端到端 %.1f ms\n",
+      std::printf("收包 %llu  组装 %llu  呈现 %llu  丢帧 %llu  解码错误 %llu  %.1f fps  "
+                  "端到端 p50 %.1f / p99 %.1f ms  分析 %llu(丢 %llu)\n",
                   static_cast<unsigned long long>(stats.datagrams_received),
                   static_cast<unsigned long long>(stats.frames_assembled),
                   static_cast<unsigned long long>(stats.frames_presented),
                   static_cast<unsigned long long>(stats.frames_dropped),
-                  static_cast<unsigned long long>(stats.packets_recovered_by_fec),
                   static_cast<unsigned long long>(stats.decoder_errors), stats.receive_fps,
-                  stats.end_to_end_ms);
+                  stats.p50_end_to_end_ms, stats.p99_end_to_end_ms,
+                  static_cast<unsigned long long>(stats.frames_analyzed),
+                  static_cast<unsigned long long>(stats.frames_analysis_dropped));
       last_report = now;
     }
   }

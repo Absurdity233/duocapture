@@ -11,8 +11,8 @@
 | M0 | 工程骨架、协议、传输、FEC、抖动缓冲、采集探测 | ✅ 已完成 |
 | M1 | WGC/DDAPI 采集 + NV12 转换 + NVENC 编码 + 解码 + 呈现 | ✅ 已完成 |
 | M2 | 双机 UDP 传输 + FEC + 限速 + 抖动缓冲 + 编解码协商 | ✅ 已完成 |
-| M3 | 音频 + remux 录制 + 推流 | ⏳ 待开始 |
-| M4 | 分析 tap + 双路分发 | ⏳ 待开始 |
+| M3 | WASAPI 环回 + AAC + 零转码 MKV 录制 | ✅ 已完成 |
+| M4 | 分析 tap（忙则丢帧）+ 遥测（p50/p99） | ✅ 已完成 |
 
 **已实现（可直接运行、有单测覆盖）**
 
@@ -31,6 +31,10 @@
 - 完整 Sender / Receiver 多线程管线
 - 编码格式随包头发送，接收端自动选择解码器
 - SPS 解析（H.264 / HEVC）以确定解码器输入的分辨率
+- WASAPI 环回音频采集 + AAC 编码，音画按采样数对齐（不随声卡时钟漂移）
+- 零转码 MKV 录制：Annex-B → 长度前缀 + hvcC/avcC，边录边写
+- 分析 tap：与呈现完全独立，「忙则丢帧」，绝不阻塞解码
+- 遥测：端到端延迟 p50 / p99、丢帧、分析吞吐
 
 ## 快速开始
 
@@ -59,8 +63,11 @@ duocapv --play
 # 无持续画面来源时，用录制的裸流回放来验证传输/解码/呈现
 duocapd --stream --playback capture.h264 --target 127.0.0.1
 
-# 录制编码后的裸码流（零转码，可直接喂 ffplay）
-duocapd --stream --target 127.0.0.1 --record capture.h264
+# 录制（零转码 MKV，含系统声音）
+duocapd --stream --target 127.0.0.1 --record capture.mkv --audio
+
+# A 端启用分析 tap（下游 CV/OCR 消费者）
+duocapv --play --analyze
 ```
 
 端口默认 50000（视频）/ 50001（控制）。避开 5000，Windows 上该端口常被系统服务占用。

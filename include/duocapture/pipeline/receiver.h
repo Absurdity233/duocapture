@@ -16,6 +16,7 @@
 #include "duocapture/encode/encoder.h"
 #include "duocapture/net/jitter_buffer.h"
 #include "duocapture/net/transport.h"
+#include "duocapture/pipeline/analysis_tap.h"
 #include "duocapture/present/presenter.h"
 
 namespace duo {
@@ -35,6 +36,9 @@ struct ReceiverConfig {
 
   bool show_window = true;
   bool vsync_off = true;  // tearing，延迟优先
+
+  // 分析 tap：把解码后的帧交给下游 CV/OCR。忙则丢帧，绝不阻塞呈现。
+  bool enable_analysis = false;
 };
 
 struct ReceiverStats {
@@ -46,6 +50,14 @@ struct ReceiverStats {
   u64 decoder_errors = 0;
   double receive_fps = 0.0;
   double end_to_end_ms = 0.0;
+
+  // 分析 tap
+  u64 frames_analyzed = 0;
+  u64 frames_analysis_dropped = 0;
+
+  // 延迟分布
+  double p50_end_to_end_ms = 0.0;
+  double p99_end_to_end_ms = 0.0;
 };
 
 // A 端接收管线：UDP → 抖动缓冲 → 解码 → 呈现。
@@ -69,6 +81,9 @@ class Receiver {
   // 窗口消息泵。show_window=false 时无窗口，此函数直接返回 true。
   bool pump();
 
+  // 设置分析回调（须在 start 之前调用）。
+  void set_analysis_callback(AnalysisTap::Callback callback, void* user);
+
   [[nodiscard]] Win32Presenter* presenter() noexcept;
 
  private:
@@ -85,6 +100,10 @@ class Receiver {
   JitterBuffer jitter_;
   std::unique_ptr<IDecoder> decoder_;
   std::unique_ptr<Win32Presenter> presenter_;
+  AnalysisTap analysis_;
+  AnalysisTap::Callback analysis_callback_ = nullptr;
+  void* analysis_user_ = nullptr;
+  RollingStats latency_stats_{600};
 
   std::thread receive_thread_;
   std::thread render_thread_;
