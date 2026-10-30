@@ -82,12 +82,44 @@ void JitterBuffer::insert(Packet packet) {
   }
 
   if (packet.is_parity()) {
+    const u8 group = packet.header.fec_group;
+    const u8 span = packet.header.fec_count;
     entry.parity.push_back(std::move(packet));
+    if (span >= 2) {
+      GroupState& state = entry.groups[group];
+      if (state.expected != 0 && state.expected != span) {
+        // 同一组号出现两种跨度，说明帧内包数超过了 u8 组号能表示的
+        // 范围、组号回绕了。按新的一组重新统计。
+        state = GroupState{};
+      }
+      state.expected = span;
+      state.parity_idx = entry.parity.size() - 1;
+    }
   } else {
-    entry.data.emplace(packet.header.pkt_index, std::move(packet));
+    const u16 pkt_index = packet.header.pkt_index;
+    const auto [slot, inserted] = entry.data.emplace(pkt_index, std::move(packet));
+    if (inserted) {
+      const Packet& stored = slot->second;
+      if (stored.header.fec_count >= 2 && stored.header.fec_index < stored.header.fec_count) {
+        GroupState& state = entry.groups[stored.header.fec_group];
+        const u16 base = static_cast<u16>(pkt_index - stored.header.fec_index);
+        if ((state.base_known && state.base != base) ||
+            (state.expected != 0 && state.expected != stored.header.fec_count)) {
+          // 组号回绕：保留已收到的校验包下标，否则这组永远恢复不了。
+          const std::size_t keep_parity = state.parity_idx;
+          state = GroupState{};
+          state.parity_idx = keep_parity;
+        }
+        if (!state.base_known) {
+          state.base = base;
+          state.base_known = true;
+        }
+        state.expected = stored.header.fec_count;
+        // std::map 的节点地址稳定：之后 emplace 别的包不会让这个指针失效。
+        state.received.push_back(&stored);
+      }
+    }
   }
-
-  try_recover(entry);
 
   if (!entry.complete && entry.pkt_count != 0 && entry.data.size() >= entry.pkt_count) {
     entry.complete = true;
@@ -96,42 +128,64 @@ void JitterBuffer::insert(Packet packet) {
   evict_if_needed(frame_id);
 }
 
-// 注意：这里在收到包的当下就尝试 FEC 恢复。若链路存在乱序，可能会把
-// "只是晚到"的包当成丢包恢复出来，白白消耗一个校验包。局域网乱序罕见，
-// 影响很小；生产版本应改为到达 NACK 期限之后才做 FEC 恢复。
-void JitterBuffer::try_recover(Entry& entry) {
-  if (entry.complete || entry.parity.empty() || entry.pkt_count == 0) {
+// 单组 FEC 恢复。
+//
+// 调用方保证该组恰好缺 1 个包（收到 expected-1 个），所以这里只做一次
+// O(group_size) 的异或：不扫整帧、不复制已有包。恢复成功或确认失败后
+// 都置 given_up，该组之后不再参与。
+void JitterBuffer::try_recover_group(Entry& entry, u8 group) {
+  const auto it = entry.groups.find(group);
+  if (it == entry.groups.end()) {
     return;
   }
-  if (entry.data.size() >= entry.pkt_count) {
-    return;
-  }
-
-  // 把当前已收到的包拼成一个工作集交给 FEC 解码器。
-  std::vector<Packet> working;
-  working.reserve(entry.data.size() + entry.parity.size());
-  for (const auto& [index, packet] : entry.data) {
-    working.push_back(packet);
-  }
-  for (const Packet& check : entry.parity) {
-    working.push_back(check);
-  }
-
-  bool recovered_any = false;
-  while (FecCodec::recover_one(working)) {
-    recovered_any = true;
-  }
-  if (!recovered_any) {
+  GroupState& state = it->second;
+  if (state.given_up || !state.base_known || state.parity_idx == kNoParity ||
+      state.expected == 0 || state.received.size() + 1 != state.expected) {
     return;
   }
 
-  for (Packet& packet : working) {
-    if (packet.is_parity()) {
+  u16 missing_index = 0;
+  Packet recovered;
+  if (!FecCodec::recover_group(state.received, &entry.parity[state.parity_idx], group, state.base,
+                               state.expected, missing_index, recovered)) {
+    state.given_up = true;
+    return;
+  }
+
+  const u16 pkt_index = recovered.header.pkt_index;
+  if (entry.data.emplace(pkt_index, std::move(recovered)).second) {
+    ++stats_.packets_recovered;
+  }
+  state.given_up = true;
+}
+
+// 等满 NACK 延迟之后再做 FEC 恢复。
+//
+// 直接原因是乱序：包到达即恢复会把「只是晚到」的包当成丢包。selftest 里
+// 丢 3 个包却触发了 10 次恢复，恢复出的包随后又被真包顶掉，纯属浪费。
+// 代价是恢复出的包要等到期才出现在 data 里，但送进解码器的时间本来
+// 也不会早于 NACK 期限——再早就是拿延迟换画面了。
+void JitterBuffer::recover_ripe_groups(Entry& entry, u64 now_ns) {
+  if (entry.complete || entry.groups.empty() || entry.pkt_count == 0) {
+    return;
+  }
+  const u64 delay_ns = static_cast<u64>(stats_.effective_nack_delay_ms) * 1'000'000ull;
+  if (entry.first_seen_ns != 0 && now_ns - entry.first_seen_ns < delay_ns) {
+    return;
+  }
+
+  for (auto& [group, state] : entry.groups) {
+    if (state.given_up || !state.base_known || state.parity_idx == kNoParity) {
       continue;
     }
-    if (entry.data.find(packet.header.pkt_index) == entry.data.end()) {
-      ++stats_.packets_recovered;
-      entry.data.emplace(packet.header.pkt_index, std::move(packet));
+    // 缺 2 个以上时不标记 given_up：NACK 补回一个之后这一组就重新变得
+    // 可恢复了，那是最值得救的场景。这里只是本轮跳过，下次 service 重看。
+    if (state.received.size() + 1 == state.expected) {
+      try_recover_group(entry, group);
+    }
+    if (entry.data.size() >= entry.pkt_count) {
+      entry.complete = true;
+      return;
     }
   }
 }
@@ -149,6 +203,23 @@ void JitterBuffer::evict_if_needed(u32 current_frame_id) {
                victim->second.parity.size());
     }
     frames_.erase(victim);
+  }
+}
+
+// 周期恢复。按 1ms 节流：调用方（接收循环）可能在每个包之后都调，
+// 但组表只在时间前进时才扫。
+void JitterBuffer::service(u64 now_ns) {
+  if (last_recover_ns_ != 0 && now_ns - last_recover_ns_ < 1'000'000ull) {
+    return;
+  }
+  last_recover_ns_ = now_ns;
+
+  for (auto& [frame_id, entry] : frames_) {
+    // 组表为空（没开 FEC）或早已完成的帧直接跳过。
+    if (entry.complete || entry.groups.empty()) {
+      continue;
+    }
+    recover_ripe_groups(entry, now_ns);
   }
 }
 
@@ -198,12 +269,26 @@ std::vector<std::pair<u32, u16>> JitterBuffer::collect_nacks(u64 now_ns) {
       continue;
     }
 
-    for (u16 index = 0; index < entry.pkt_count; ++index) {
-      if (entry.data.find(index) == entry.data.end()) {
-        missing.emplace_back(frame_id, index);
+    // data 按 pkt_index 有序，顺序走一遍就能找出所有空洞，
+    // 不用对每个序号做一次 map 查找（旧实现是 O(N log N)）。
+    const std::size_t before = missing.size();
+    u16 next = 0;
+    for (const auto& [index, packet] : entry.data) {
+      if (index >= entry.pkt_count) {
+        break;
       }
+      while (next < index) {
+        missing.emplace_back(frame_id, next++);
+      }
+      next = static_cast<u16>(index + 1);
     }
-    if (!missing.empty()) {
+    while (next < entry.pkt_count) {
+      missing.emplace_back(frame_id, next++);
+    }
+
+    // 只给「确实有缺包」的帧打时间戳，否则一帧缺包会把同轮其他
+    // 本来就完整的帧也标记成刚发过 NACK。
+    if (missing.size() != before) {
       entry.last_nack_ns = now_ns;
       ++stats_.nacks_issued;
     }

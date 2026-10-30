@@ -10,7 +10,7 @@ struct PacketHeader {
   uint8_t  fec_group;      // 帧内 FEC 组序号
   uint8_t  fec_index;      // 组内序号；== fec_count 表示校验包
   uint8_t  fec_count;      // 该组数据包数量（0 表示未启用 FEC）
-  uint16_t reserved;       // 0
+  uint16_t reserved;       // 数据包：高 8 位 codec；校验包：尾包真实载荷长度
   uint32_t frame_id;       // 帧序号，单调递增
   uint16_t pkt_index;      // 帧内包序号；校验包为 0xF000 + 组号
   uint16_t pkt_count;      // 该帧数据包总数
@@ -31,9 +31,15 @@ struct PacketHeader {
 ## 载荷
 
 - 数据包：编码器输出的字节切片，顺序拼接即为该帧的完整码流
-- 校验包：对同组所有数据包的**完整字节**（包头 + 载荷，补齐到 1232 字节）做 XOR
+- 校验包：只对同组所有数据包的**载荷**（补齐到 1200 字节）做 XOR
 
-校验覆盖包头，因此恢复出的包自带正确的 `pkt_index` / `payload_len`，不需要额外索引。
+校验只覆盖载荷，包头由接收端从同组兄弟包重建。若该校验组包含帧尾包，
+其真实载荷长度放在校验包的 `reserved` 字段里（整个 16 位，不用 8 位——
+尾包常常超过 255 字节）。
+
+恢复出的数据包 `pkt_index = 组基址 + 组内缺号`，组基址由
+`pkt_index - fec_index` 推出；帧尾组通常不满 `fec_count`，不能假设
+它是 `fec_group * group_size`。
 
 ## 端口
 

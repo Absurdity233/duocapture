@@ -140,8 +140,9 @@ void Receiver::receive_loop() {
       continue;
     }
 
-    // 编码格式随包头发送，首帧到达时据此选解码器。
-    if (!decoder_configured_) {
+    // 编码格式随数据包头发送，首帧到达时据此选解码器。
+    // 跳过校验包：校验包的 reserved 字段用来存尾包长度，不是 codec。
+    if (!decoder_configured_ && (header.flags & kFlagFecParity) == 0) {
       const u8 codec_field = static_cast<u8>(header.reserved >> 8);
       codec_ = codec_field == 0 ? Codec::H264 : (codec_field == 2 ? Codec::Av1 : Codec::Hevc);
     }
@@ -158,6 +159,10 @@ void Receiver::receive_loop() {
     }
 
     jitter_.insert(std::move(packet));
+
+    // FEC 恢复要等到期（NACK 延迟）之后才做，所以试着取帧之前先跑一次
+    // 周期维护——否则恢复出的包要等到下一个包到达才被看到。
+    jitter_.service(Clock::now_ns());
 
     AssembledFrame frame;
     while (jitter_.try_pop(frame)) {

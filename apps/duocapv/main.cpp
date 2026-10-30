@@ -94,6 +94,9 @@ int run_monitor(duo::u16 port, double seconds) {
     packet.header = header;
     packet.payload.assign(payload.begin(), payload.end());
     jitter.insert(std::move(packet));
+    // FEC 恢复要等到 NACK 期限之后，monitor 没有单独的定时线程，
+    // 所以在每个包之后跑一次维护（内部按 1ms 节流）。
+    jitter.service(duo::Clock::now_ns());
 
     // monitor 模式也要消费，否则窗口会被填满、组装统计永远是 0。
     duo::AssembledFrame assembled;

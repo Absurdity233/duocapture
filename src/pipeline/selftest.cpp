@@ -77,6 +77,10 @@ bool run_net_selftest(bool verbose) {
     jitter.insert(packet);
   }
 
+  // FEC 恢复发生在 NACK 期限之后（避免把「只是晚到」当成丢包），
+  // 这里模拟时间已经走过期限。
+  jitter.service(Clock::now_ns() + 50'000'000ull);
+
   AssembledFrame frame;
   const bool got = jitter.try_pop(frame);
   pass &= check(got, "jitter buffer assembled the frame", verbose);

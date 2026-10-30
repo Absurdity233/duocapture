@@ -6,6 +6,7 @@ CMakeUserPresets.json
 
 # visual studio
 .vs/
+.idea/
 *.vcxproj
 *.vcxproj.*
 *.sln

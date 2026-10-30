@@ -178,6 +178,106 @@ DUO_TEST(jitter_buffer_nacks_missing) {
   }
 }
 
+DUO_TEST(jitter_buffer_recovers_tail_group_after_timeout) {
+  // 帧尾那组通常不满 group_size，而且尾包载荷常常超过 255 字节。
+  // 旧实现有两处会在这里出错：组基址用 group*group_size 推算（尾组错位），
+  // 尾包长度只存低 8 位（800 字节被截成 32）。
+  const duo::Bytes frame = make_payload(200 * 1024, 5);  // 171 包，尾组 11 个
+  duo::FrameMeta meta{};
+  meta.frame_id = 21;
+
+  const duo::Packetizer packetizer;
+  auto packets = packetizer.packetize(meta, frame);
+  auto parity = duo::FecCodec::encode_frame(packets, 16);
+
+  const duo::u16 last_index = static_cast<duo::u16>(packets.size() - 1);
+  DUO_CHECK(packets.back().payload.size() > 255);
+
+  duo::JitterBuffer jitter(16, 0);  // NACK 延迟 0，立即允许 FEC
+  for (const auto& packet : packets) {
+    if (packet.header.pkt_index == last_index) {
+      continue;  // 丢掉尾包
+    }
+    jitter.insert(packet);
+  }
+  for (const auto& check : parity) {
+    jitter.insert(check);
+  }
+  jitter.service(duo::Clock::now_ns() + 50'000'000ull);
+
+  duo::AssembledFrame out;
+  DUO_CHECK(jitter.try_pop(out));
+  DUO_CHECK_EQ(out.data.size(), frame.size());
+  DUO_CHECK(out.data == frame);
+}
+
+DUO_TEST(jitter_buffer_does_not_recover_before_timeout) {
+  // 乱序链路上，缺的那个包通常只是还在路上。包一到就恢复会把它们
+  // 全部"恢复"一遍，白烧校验包还算小事，恢复包被真包顶掉后帧仍然
+  // 完整，问题被完全掩盖。这里要求：没过 NACK 期限时一次都不恢复。
+  const duo::Bytes frame = make_payload(200 * 1024, 6);
+  duo::FrameMeta meta{};
+  meta.frame_id = 22;
+
+  const duo::Packetizer packetizer;
+  auto packets = packetizer.packetize(meta, frame);
+  auto parity = duo::FecCodec::encode_frame(packets, 16);
+
+  duo::JitterBuffer jitter(16, 1000);  // 1 秒后才允许恢复
+  std::mt19937 rng(11);
+  std::vector<duo::Packet> wire(packets);
+  wire.insert(wire.end(), parity.begin(), parity.end());
+  std::shuffle(wire.begin(), wire.end(), rng);
+
+  for (const auto& packet : wire) {
+    if (!packet.is_parity() && packet.header.pkt_index % 16 == 3) {
+      continue;  // 每组丢 1 个
+    }
+    jitter.insert(packet);
+  }
+  jitter.service(duo::Clock::now_ns());
+  DUO_CHECK_EQ(jitter.stats().packets_recovered, 0ull);
+
+  jitter.service(duo::Clock::now_ns() + 2'000'000'000ull);
+  DUO_CHECK_EQ(jitter.stats().packets_recovered, static_cast<duo::u64>(parity.size()));
+}
+
+DUO_TEST(jitter_buffer_fec_after_nack_retransmit) {
+  // 先丢 2 个包（XOR 救不回来），NACK 补回 1 个之后只剩 1 个缺口，
+  // 此时 FEC 才应该生效。恢复状态不能在"缺 2 个"时被永久放弃。
+  const duo::Bytes frame = make_payload(6000, 7);  // 5 包，单组
+  duo::FrameMeta meta{};
+  meta.frame_id = 23;
+
+  const duo::Packetizer packetizer;
+  auto packets = packetizer.packetize(meta, frame);
+  auto parity = duo::FecCodec::encode_frame(packets, 16);
+  DUO_CHECK_EQ(parity.size(), static_cast<std::size_t>(1));
+
+  duo::JitterBuffer jitter(16, 0);
+  for (const auto& packet : packets) {
+    if (packet.header.pkt_index == 1 || packet.header.pkt_index == 3) {
+      continue;
+    }
+    jitter.insert(packet);
+  }
+  jitter.insert(parity.front());
+
+  jitter.service(duo::Clock::now_ns() + 50'000'000ull);
+  DUO_CHECK_EQ(jitter.stats().packets_recovered, 0ull);  // 缺 2 个，救不了
+
+  duo::AssembledFrame out;
+  DUO_CHECK(!jitter.try_pop(out));
+
+  // NACK 重传补回 1 号包
+  jitter.insert(packets[1]);
+  jitter.service(duo::Clock::now_ns() + 100'000'000ull);
+
+  DUO_CHECK(jitter.try_pop(out));
+  DUO_CHECK(out.data == frame);
+  DUO_CHECK_EQ(jitter.stats().packets_recovered, 1ull);
+}
+
 DUO_TEST(pacer_throttles) {
   // 1 MB/s，100 个满载包（约 123 KB）远超 burst 上限，必须分多次才放完。
   duo::Pacer pacer(1000ull * 1000, 8 * 1024);  // 1 MB/s, burst 8 KB
