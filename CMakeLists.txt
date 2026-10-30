@@ -37,6 +37,7 @@ add_library(duocore STATIC
   src/encode/nvenc_encoder.cpp
   src/decode/nvdec_decoder.cpp
   src/decode/sps_parser.cpp
+  src/decode/nvdec_cuvid.cpp
   src/present/swapchain_presenter.cpp
   src/pipeline/sender.cpp
   src/pipeline/receiver.cpp

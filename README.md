@@ -26,7 +26,7 @@
 
 - NVENC 硬件编码器（运行时动态加载 `nvEncodeAPI64.dll`，无需 SDK 头文件即可构建）
 - BGRA → NV12 GPU 转换（两趟 compute shader，BT.709 limited range）
-- Media Foundation 解码（优先硬件 MFT，自动回退软件 MFT + CPU 上传）
+- NVDEC 硬件解码（CUVID 直连，不依赖 MF）；不可用时回退 Media Foundation
 - flip-model 交换链呈现（DXGI tearing，最大帧延迟 1）
 - 完整 Sender / Receiver 多线程管线
 - 编码格式随包头发送，接收端自动选择解码器

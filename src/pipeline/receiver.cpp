@@ -58,15 +58,9 @@ Status Receiver::start(const ReceiverConfig& config) {
       return status;
     }
 
-    auto* d3d_decoder = dynamic_cast<D3d11vaDecoder*>(decoder_.get());
-    if (d3d_decoder == nullptr) {
-      DUO_ERROR("解码器不是 D3D11 实现，无法与呈现器共享设备");
-      socket_.close();
-      return Status::NotSupported;
-    }
-    status = d3d_decoder->initialize(presenter_->device(), presenter_->context());
+    status = decoder_->bind_device(presenter_->device(), presenter_->context());
     if (!ok(status)) {
-      DUO_ERROR("解码器初始化失败: %s", to_string(status));
+      DUO_ERROR("解码器无法绑定呈现器的 D3D11 设备: %s", to_string(status));
       socket_.close();
       return status;
     }
@@ -200,12 +194,7 @@ Status Receiver::ensure_decoder(const AssembledFrame& first_frame, u32 width, u3
     return Status::Ok;
   }
 
-  auto* d3d_decoder = dynamic_cast<D3d11vaDecoder*>(decoder_.get());
-  if (d3d_decoder == nullptr) {
-    return Status::NotSupported;
-  }
-
-  Status status = d3d_decoder->configure(
+  Status status = decoder_->configure(
       codec_, ByteSpan(first_frame.data.data(), first_frame.data.size()));
   if (!ok(status)) {
     return status;

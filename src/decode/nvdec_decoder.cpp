@@ -37,6 +37,7 @@
 #include <vector>
 
 #include "duocapture/common/log.h"
+#include "duocapture/decode/nvdec_decoder.h"
 #include "duocapture/decode/sps_parser.h"
 
 using Microsoft::WRL::ComPtr;
@@ -643,7 +644,18 @@ void D3d11vaDecoder::release(DecodedFrame& frame) {
 
 const char* D3d11vaDecoder::backend_name() const { return "d3d11va-mft"; }
 
-std::unique_ptr<IDecoder> create_decoder() { return std::make_unique<D3d11vaDecoder>(); }
+// 工厂：优先 NVDEC（真正的硬件解码），失败才退回 Media Foundation。
+//
+// 这台机器上 MF 没有硬件解码 MFT（MFTEnumEx(HARDWARE) 返回 0），所以
+// 如果先试 MF，永远只能拿到软解。顺序反了等于白装一块 5070。
+std::unique_ptr<IDecoder> create_decoder() {
+  if (nvdec_available()) {
+    DUO_INFO("解码后端: NVDEC（CUVID 硬件解码）");
+    return std::make_unique<NvdecDecoder>();
+  }
+  DUO_WARN("NVDEC 不可用，退回 Media Foundation（可能是软件解码）");
+  return std::make_unique<D3d11vaDecoder>();
+}
 
 }  // namespace duo
 

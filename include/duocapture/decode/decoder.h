@@ -24,6 +24,14 @@ class IDecoder {
  public:
   virtual ~IDecoder() = default;
 
+  // 绑定 D3D11 设备。需要与呈现器共用同一块设备的解码器实现它；
+  // 不依赖 D3D11 的后端可以忽略。返回 NotSupported 表示该后端不支持。
+  virtual Status bind_device(ID3D11Device* device, ID3D11DeviceContext* context) {
+    (void)device;
+    (void)context;
+    return Status::NotSupported;
+  }
+
   // first_access_unit：用于提取 SPS/PPS 构造 MF_MT_MPEG_SEQUENCE_HEADER。
   // 传空则跳过，某些解码器不需要它。
   virtual Status configure(Codec codec, ByteSpan first_access_unit) = 0;
@@ -59,6 +67,9 @@ class D3d11vaDecoder final : public IDecoder {
 
   // device 必须与呈现器使用同一个。
   Status initialize(ID3D11Device* device, ID3D11DeviceContext* context);
+  Status bind_device(ID3D11Device* device, ID3D11DeviceContext* context) override {
+    return initialize(device, context);
+  }
 
   Status configure(Codec codec, ByteSpan first_access_unit) override;
   Status decode(ByteSpan access_unit, u64 capture_ts_ns, DecodedFrame& out) override;
