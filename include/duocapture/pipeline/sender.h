@@ -20,6 +20,7 @@
 #include "duocapture/audio/aac_encoder.h"
 #include "duocapture/audio/wasapi_loopback.h"
 #include "duocapture/record/mkv_muxer.h"
+#include "duocapture/record/stream_pusher.h"
 
 namespace duo {
 
@@ -45,6 +46,11 @@ struct SenderConfig {
   // 录到本地 MKV。零转码：直接把编码器输出封装进容器，不重编码。
   // 空字符串表示不录制。
   std::string record_path;
+
+  // 推流地址（rtmp:// 或 srt://）。空表示不推流。
+  // 走 ffmpeg 子进程 + 命名管道，-c copy 零转码。
+  std::string push_url;
+  std::string ffmpeg_path;
 
   // 是否采集系统声音（WASAPI 环回）并混入录制/传输。
   bool capture_audio = false;
@@ -106,11 +112,14 @@ class Sender {
   Pacer pacer_;
 
   MkvMuxer muxer_;
+  StreamPusher pusher_;
   WasapiLoopback audio_capture_;
   AacEncoder audio_encoder_;
   std::thread audio_thread_;
   // 音频时间轴锚点：第一个视频帧的采集时间戳，音频按它对齐。
   std::atomic<u64> audio_anchor_ns_{0};
+  // 音频包用自己的 frame_id 空间，避免和视频帧号混淆
+  std::atomic<u32> next_audio_id_{0};
   std::thread capture_thread_;
   std::thread send_thread_;
 

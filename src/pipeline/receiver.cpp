@@ -122,6 +122,14 @@ void Receiver::receive_loop() {
     Packet packet;
     packet.header = header;
     packet.payload.assign(payload.begin(), payload.end());
+
+    // 音频和视频走不同的缓冲：音频不进抖动缓冲（它没有帧间依赖，
+    // 而且一旦重排就会造成可听见的断音），直接在收到时拼装播放。
+    if (packet.is_audio()) {
+      handle_audio_packet(packet);
+      continue;
+    }
+
     jitter_.insert(std::move(packet));
 
     AssembledFrame frame;
@@ -200,6 +208,67 @@ void Receiver::receive_loop() {
 
   const auto nacks = jitter_.collect_nacks(Clock::now_ns());
   (void)nacks;  // M2 的控制通道回传在下一步接入
+}
+
+void Receiver::handle_audio_packet(const Packet& packet) {
+  if (!config_.play_audio) {
+    return;
+  }
+
+  Bytes assembled;
+  {
+    std::lock_guard<std::mutex> lock(audio_mutex_);
+
+    auto& bucket = audio_pending_[packet.header.frame_id];
+    bucket.push_back(packet);
+
+    if (bucket.size() < packet.header.pkt_count) {
+      return;  // 还没收齐
+    }
+
+    // 按 pkt_index 排序后拼接
+    std::sort(bucket.begin(), bucket.end(), [](const Packet& a, const Packet& b) {
+      return a.header.pkt_index < b.header.pkt_index;
+    });
+    for (const Packet& p : bucket) {
+      assembled.insert(assembled.end(), p.payload.begin(), p.payload.end());
+    }
+    audio_pending_.erase(packet.header.frame_id);
+
+    // 攒太多说明有空洞，清掉最老的，避免内存涨
+    while (audio_pending_.size() > 64) {
+      audio_pending_.erase(audio_pending_.begin());
+    }
+  }
+
+  if (!audio_started_) {
+    if (!ok(audio_decoder_.open())) {
+      DUO_WARN("AAC 解码器启动失败，关闭音频播放");
+      config_.play_audio = false;
+      return;
+    }
+    if (!ok(audio_render_.start(audio_decoder_.sample_rate(), audio_decoder_.channels()))) {
+      DUO_WARN("音频播放启动失败，关闭音频播放");
+      config_.play_audio = false;
+      audio_decoder_.close();
+      return;
+    }
+    audio_started_ = true;
+  }
+
+  std::vector<i16> pcm;
+  const Status st = audio_decoder_.decode(ByteSpan(assembled.data(), assembled.size()), pcm);
+  if (!ok(st)) {
+    std::lock_guard<std::mutex> lock(stats_mutex_);
+    ++stats_.audio_decode_errors;
+    return;
+  }
+  if (!pcm.empty()) {
+    audio_render_.write(ByteSpan(reinterpret_cast<const u8*>(pcm.data()),
+                                 pcm.size() * sizeof(i16)));
+    std::lock_guard<std::mutex> lock(stats_mutex_);
+    ++stats_.audio_frames;
+  }
 }
 
 Status Receiver::ensure_decoder(const AssembledFrame& first_frame, u32 width, u32 height) {
@@ -308,6 +377,8 @@ void Receiver::stop() {
   }
 
   analysis_.stop();
+  audio_render_.stop();
+  audio_decoder_.close();
 
   if (decoder_) {
     decoder_.reset();  // 必须在呈现器之前销毁：它引用了呈现器的 D3D 设备
@@ -326,6 +397,8 @@ ReceiverStats Receiver::stats() const {
   out.frames_dropped = std::max(out.frames_dropped, jitter_.stats().frames_dropped);
   out.frames_analyzed = analysis_.frames_analyzed();
   out.frames_analysis_dropped = analysis_.frames_dropped();
+  out.audio_frames = stats_.audio_frames;
+  out.audio_decode_errors = stats_.audio_decode_errors;
   out.p50_end_to_end_ms = latency_stats_.percentile(0.5);
   out.p99_end_to_end_ms = latency_stats_.percentile(0.99);
   return out;

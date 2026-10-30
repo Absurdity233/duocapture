@@ -35,8 +35,8 @@
 - [x] AAC 编码（系统没有 Opus 编码器 MFT，AAC-LC 听感同级）
 - [x] 音画时间戳对齐：按累计采样数推算，不随声卡时钟漂移
 - [x] 零转码 MKV 录制（Annex-B → 长度前缀 + hvcC/avcC）
-- [ ] A 端二次编码推流（RTMP / SRT）—— 需要接 librtmp/libavformat
-- [ ] 音频网络传输（当前音频只进录制，未走 UDP）
+- [x] 音频网络传输（UDP，`kFlagAudio` 标志位，向后兼容）
+- [x] RTMP / SRT 推流（ffmpeg 子进程 + 匿名管道，`-c copy` 零转码）
 
 ## M4 — 分析与多路
 

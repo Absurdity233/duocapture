@@ -165,6 +165,31 @@ Status Sender::setup_pipeline() {
     }
   }
 
+  // 推流：ffmpeg 子进程 + 管道，-c copy 零转码
+  if (!config_.push_url.empty()) {
+    pusher_.set_video_format(config_.codec, width_, height_, config_.fps);
+    if (config_.capture_audio && audio_encoder_.is_open()) {
+      const AudioFormat& af = audio_capture_.format();
+      static const int kRates[] = {96000, 88200, 64000, 48000, 44100, 32000, 24000,
+                                   22050, 16000, 12000, 11025, 8000,  7350};
+      int freq_index = 3;
+      for (int i = 0; i < 13; ++i) {
+        if (kRates[i] == static_cast<int>(af.sample_rate)) { freq_index = i; break; }
+      }
+      const int chan_cfg = af.channels == 1 ? 1 : 2;
+      Bytes asc;
+      asc.push_back(static_cast<u8>((2 << 3) | ((freq_index >> 1) & 0x7)));
+      asc.push_back(static_cast<u8>(((freq_index & 0x1) << 7) | ((chan_cfg & 0xF) << 3)));
+      pusher_.set_audio_format(af.sample_rate, af.channels, asc);
+    }
+    const Status ps = pusher_.start(config_.push_url, config_.ffmpeg_path);
+    if (ok(ps)) {
+      DUO_INFO("推流到 %s", config_.push_url.c_str());
+    } else {
+      DUO_WARN("推流启动失败: %s", to_string(ps));
+    }
+  }
+
   if (!config_.record_path.empty()) {
     const Status rs = muxer_.open(config_.record_path, config_.codec, width_, height_, config_.fps);
     if (ok(rs)) {
@@ -382,11 +407,17 @@ void Sender::capture_loop() {
       audio_anchor_ns_.store(encoded.capture_ts_ns, std::memory_order_release);
     }
 
+    const ByteSpan frame_span(encoded.data.data(), encoded.data.size());
     if (muxer_.is_open()) {
-      const Status rs = muxer_.write_frame(
-          ByteSpan(encoded.data.data(), encoded.data.size()), encoded.capture_ts_ns, encoded.key);
+      const Status rs = muxer_.write_frame(frame_span, encoded.capture_ts_ns, encoded.key);
       if (!ok(rs)) {
         DUO_WARN("写 MKV 失败: %s", to_string(rs));
+      }
+    }
+    if (pusher_.is_open()) {
+      const Status ps = pusher_.push_frame(frame_span, encoded.capture_ts_ns, encoded.key);
+      if (!ok(ps)) {
+        DUO_WARN("推流失败: %s", to_string(ps));
       }
     }
 
@@ -501,7 +532,43 @@ void Sender::audio_loop() {
       if (muxer_.is_open() && anchor != 0) {
         muxer_.write_audio(ByteSpan(frame.data(), frame.size()), ts_ns);
       }
-      // TODO: 网络传输音频（M3 后半段）
+      if (pusher_.is_open() && anchor != 0) {
+        pusher_.push_audio(ByteSpan(frame.data(), frame.size()), ts_ns);
+      }
+
+      // 音频走网络：一帧 AAC 通常只有几百字节，单包就够。
+      // 超过 1200 字节才切包（高码率下可能出现）。
+      const std::size_t chunk = kMaxPacketPayload;
+      const std::size_t count = (frame.size() + chunk - 1) / chunk;
+      for (std::size_t i = 0; i < count; ++i) {
+        const std::size_t off = i * chunk;
+        const std::size_t len = std::min(chunk, frame.size() - off);
+
+        Packet packet;
+        packet.header.magic = kProtocolMagic;
+        packet.header.version = kProtocolVersion;
+        packet.header.flags = kFlagAudio;
+        if (i == 0) packet.header.flags |= kFlagFrameStart;
+        if (i + 1 == count) packet.header.flags |= kFlagFrameEnd;
+        // 音频包不做 FEC：单帧小，丢了就丢了，补发反而增加延迟
+        packet.header.fec_group = 0;
+        packet.header.fec_index = 0;
+        packet.header.fec_count = 0;
+        packet.header.reserved = 0;
+        packet.header.frame_id = next_audio_id_.fetch_add(1, std::memory_order_relaxed);
+        packet.header.pkt_index = static_cast<u16>(i);
+        packet.header.pkt_count = static_cast<u16>(count);
+        packet.header.capture_ts_ns = ts_ns;
+        packet.header.payload_len = static_cast<u32>(len);
+        packet.payload.assign(frame.begin() + static_cast<std::ptrdiff_t>(off),
+                              frame.begin() + static_cast<std::ptrdiff_t>(off + len));
+
+        {
+          std::lock_guard<std::mutex> lock(queue_mutex_);
+          pending_.push_back(std::move(packet));
+        }
+        queue_cv_.notify_one();
+      }
     }
   }
 }
@@ -585,6 +652,9 @@ void Sender::stop() {
   }
   converter_.shutdown();
   encoder_.reset();
+  if (pusher_.is_open()) {
+    pusher_.stop();
+  }
   if (muxer_.is_open()) {
     muxer_.close();
   }

@@ -155,6 +155,10 @@ int run_stream(int argc, char** argv) {
       config.record_path = argv[++i];
     } else if (arg == "--playback" && has_next) {
       config.playback_path = argv[++i];
+    } else if (arg == "--push" && has_next) {
+      config.push_url = argv[++i];
+    } else if (arg == "--ffmpeg" && has_next) {
+      config.ffmpeg_path = argv[++i];
     } else if (arg == "--audio") {
       config.capture_audio = true;
     } else if (arg == "--audio-bitrate" && has_next) {

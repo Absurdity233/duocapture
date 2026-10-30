@@ -239,6 +239,18 @@ MkvMuxer::MkvMuxer() = default;
 
 MkvMuxer::~MkvMuxer() { abort(); }
 
+void MkvMuxer::emit(const u8* data, std::size_t size) {
+  if (size == 0) {
+    return;
+  }
+  if (sink_ != nullptr) {
+    sink_(sink_user_, data, size);
+  } else if (file_ != nullptr) {
+    std::fwrite(data, 1, size, file_);
+  }
+  bytes_written_ += size;
+}
+
 void MkvMuxer::write_element_id(u32 id) {
   // ID 已经带长度位，直接按它自身占用的字节数写。
   u8 buf[4];
@@ -255,24 +267,51 @@ void MkvMuxer::write_element_id(u32 id) {
   if (id & 0x000000FF) {
     buf[n++] = static_cast<u8>(id);
   }
-  std::fwrite(buf, 1, static_cast<std::size_t>(n), file_);
-  bytes_written_ += static_cast<u64>(n);
+  emit(buf, static_cast<std::size_t>(n));
 }
 
 void MkvMuxer::write_vint_size(u64 size) {
   std::vector<u8> buf;
   append_vint(buf, size);
-  std::fwrite(buf.data(), 1, buf.size(), file_);
-  bytes_written_ += buf.size();
+  emit(buf.data(), buf.size());
 }
 
 void MkvMuxer::write_element(u32 id, ByteSpan payload) {
   write_element_id(id);
   write_vint_size(payload.size());
   if (!payload.empty()) {
-    std::fwrite(payload.data(), 1, payload.size(), file_);
-    bytes_written_ += payload.size();
+    emit(payload.data(), payload.size());
   }
+}
+
+Status MkvMuxer::open_sink(Sink sink, void* user, Codec codec, u32 width, u32 height, u32 fps) {
+  if (file_ != nullptr || sink_ != nullptr) {
+    return Status::InvalidArgument;
+  }
+  if (sink == nullptr) {
+    return Status::InvalidArgument;
+  }
+  sink_ = sink;
+  sink_user_ = user;
+  codec_ = codec;
+  width_ = width;
+  height_ = height;
+  fps_ = fps == 0 ? 60 : fps;
+  bytes_written_ = 0;
+  frames_written_ = 0;
+  have_first_ts_ = false;
+  have_first_audio_ts_ = false;
+  cluster_open_ = false;
+  last_frame_timecode_ = 0;
+  last_audio_timecode_ = 0;
+  cue_points_.clear();
+
+  Status status = write_header(codec, width, height);
+  if (!ok(status)) {
+    sink_ = nullptr;
+    return status;
+  }
+  return Status::Ok;
 }
 
 Status MkvMuxer::open(const std::string& path, Codec codec, u32 width, u32 height, u32 fps) {
@@ -340,17 +379,15 @@ Status MkvMuxer::write_header(Codec codec, u32 width, u32 height) {
     sub(kIdDocTypeReadVersion, v2);
 
     write_vint_size(body.size());
-    std::fwrite(body.data(), 1, body.size(), file_);
-    bytes_written_ += body.size();
+    emit(body.data(), body.size());
     (void)hdr;
   }
 
   // ---- Segment（未知长度，边写边填）----
   write_element_id(kIdSegment);
   {
-    u8 unknown = kUnknownSize1;
-    std::fwrite(&unknown, 1, 1, file_);
-    bytes_written_ += 1;
+    const u8 unknown = kUnknownSize1;
+    emit(&unknown, 1);
   }
 
   // ---- Info ----
@@ -390,9 +427,8 @@ Status MkvMuxer::start_cluster(u64 timecode_ms) {
   // Cues/Segment 结束来界定。MKV 解析器接受这种写法。
   write_element_id(kIdCluster);
   {
-    u8 unknown = kUnknownSize1;
-    std::fwrite(&unknown, 1, 1, file_);
-    bytes_written_ += 1;
+    const u8 unknown = kUnknownSize1;
+    emit(&unknown, 1);
   }
 
   cluster_start_pos_ = bytes_written_;
@@ -408,7 +444,7 @@ Status MkvMuxer::start_cluster(u64 timecode_ms) {
 }
 
 Status MkvMuxer::write_frame(ByteSpan frame, u64 capture_ts_ns, bool keyframe) {
-  if (file_ == nullptr) {
+  if (file_ == nullptr && sink_ == nullptr) {
     return Status::NotInitialized;
   }
   if (!have_first_ts_) {
@@ -589,7 +625,7 @@ Status MkvMuxer::write_frame(ByteSpan frame, u64 capture_ts_ns, bool keyframe) {
 }
 
 Status MkvMuxer::enable_audio(u32 sample_rate, u16 channels, const Bytes& audio_private) {
-  if (file_ == nullptr) {
+  if (file_ == nullptr && sink_ == nullptr) {
     return Status::NotInitialized;
   }
   if (frames_written_ > 0) {
@@ -604,7 +640,7 @@ Status MkvMuxer::enable_audio(u32 sample_rate, u16 channels, const Bytes& audio_
 }
 
 Status MkvMuxer::write_audio(ByteSpan aac_frame, u64 capture_ts_ns) {
-  if (file_ == nullptr || !audio_enabled_) {
+  if ((file_ == nullptr && sink_ == nullptr) || !audio_enabled_) {
     return Status::NotInitialized;
   }
   if (!have_first_ts_) {
@@ -644,7 +680,7 @@ Status MkvMuxer::write_audio(ByteSpan aac_frame, u64 capture_ts_ns) {
 }
 
 Status MkvMuxer::close() {
-  if (file_ == nullptr) {
+  if (file_ == nullptr && sink_ == nullptr) {
     return Status::NotInitialized;
   }
 
@@ -705,8 +741,11 @@ Status MkvMuxer::close() {
     write_element(kIdCues, ByteSpan(cues.data(), cues.size()));
   }
 
-  std::fclose(file_);
-  file_ = nullptr;
+  if (file_ != nullptr) {
+    std::fclose(file_);
+    file_ = nullptr;
+  }
+  sink_ = nullptr;
   DUO_INFO("MKV 录制结束: %llu 帧, %.1f MB", static_cast<unsigned long long>(frames_written_),
            static_cast<double>(bytes_written_) / (1024.0 * 1024.0));
   return Status::Ok;
@@ -717,6 +756,7 @@ void MkvMuxer::abort() {
     std::fclose(file_);
     file_ = nullptr;
   }
+  sink_ = nullptr;
 }
 
 }  // namespace duo

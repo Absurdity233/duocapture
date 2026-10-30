@@ -4,6 +4,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -16,6 +17,8 @@
 #include "duocapture/encode/encoder.h"
 #include "duocapture/net/jitter_buffer.h"
 #include "duocapture/net/transport.h"
+#include "duocapture/audio/aac_decoder.h"
+#include "duocapture/audio/wasapi_render.h"
 #include "duocapture/pipeline/analysis_tap.h"
 #include "duocapture/present/presenter.h"
 
@@ -39,6 +42,9 @@ struct ReceiverConfig {
 
   // 分析 tap：把解码后的帧交给下游 CV/OCR。忙则丢帧，绝不阻塞呈现。
   bool enable_analysis = false;
+
+  // 播放音频（A 端出声）。
+  bool play_audio = true;
 };
 
 struct ReceiverStats {
@@ -54,6 +60,10 @@ struct ReceiverStats {
   // 分析 tap
   u64 frames_analyzed = 0;
   u64 frames_analysis_dropped = 0;
+
+  // 音频
+  u64 audio_frames = 0;
+  u64 audio_decode_errors = 0;
 
   // 延迟分布
   double p50_end_to_end_ms = 0.0;
@@ -88,6 +98,7 @@ class Receiver {
 
  private:
   void receive_loop();
+  void handle_audio_packet(const Packet& packet);
   void render_loop();
   Status ensure_decoder(const AssembledFrame& first_frame, u32 width, u32 height);
 
@@ -104,6 +115,13 @@ class Receiver {
   AnalysisTap::Callback analysis_callback_ = nullptr;
   void* analysis_user_ = nullptr;
   RollingStats latency_stats_{600};
+
+  // 音频：按 frame_id 攒包，齐了就解
+  AacDecoder audio_decoder_;
+  WasapiRender audio_render_;
+  bool audio_started_ = false;
+  std::map<u32, std::vector<Packet>> audio_pending_;
+  std::mutex audio_mutex_;
 
   std::thread receive_thread_;
   std::thread render_thread_;

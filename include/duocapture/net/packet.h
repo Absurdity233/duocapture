@@ -9,6 +9,10 @@ inline constexpr u8 kFlagKeyFrame = 0x01;   // 该帧为关键帧（IDR）
 inline constexpr u8 kFlagFrameStart = 0x02; // 该包是帧的第一个包
 inline constexpr u8 kFlagFrameEnd = 0x04;   // 该包是帧的最后一个包
 inline constexpr u8 kFlagFecParity = 0x08;  // 该包是 FEC 校验包
+// 音频包。用标志位而不是新字段，是为了不改包布局、保持向后兼容：
+// 老版本收到音频包会因为不认识这个位而当成视频包丢掉（校验失败），
+// 新版本收到老版本（无音频）的流也照常工作。
+inline constexpr u8 kFlagAudio = 0x10;
 
 // 校验包的 pkt_index 从这里开始编号，与数据包区分开。
 inline constexpr u16 kParityIndexBase = 0xF000;
@@ -43,6 +47,7 @@ struct Packet {
   }
   [[nodiscard]] bool is_parity() const noexcept { return (header.flags & kFlagFecParity) != 0; }
   [[nodiscard]] bool is_key() const noexcept { return (header.flags & kFlagKeyFrame) != 0; }
+  [[nodiscard]] bool is_audio() const noexcept { return (header.flags & kFlagAudio) != 0; }
 };
 
 // 序列化为连续字节（包头 + 载荷）。

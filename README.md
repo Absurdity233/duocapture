@@ -11,7 +11,7 @@
 | M0 | 工程骨架、协议、传输、FEC、抖动缓冲、采集探测 | ✅ 已完成 |
 | M1 | WGC/DDAPI 采集 + NV12 转换 + NVENC 编码 + 解码 + 呈现 | ✅ 已完成 |
 | M2 | 双机 UDP 传输 + FEC + 限速 + 抖动缓冲 + 编解码协商 | ✅ 已完成 |
-| M3 | WASAPI 环回 + AAC + 零转码 MKV 录制 | ✅ 已完成 |
+| M3 | 音频（采集/传输/播放）+ 零转码 MKV 录制 + RTMP/SRT 推流 | ✅ 已完成 |
 | M4 | 分析 tap（忙则丢帧）+ 遥测（p50/p99） | ✅ 已完成 |
 
 **已实现（可直接运行、有单测覆盖）**
@@ -35,6 +35,8 @@
 - 零转码 MKV 录制：Annex-B → 长度前缀 + hvcC/avcC，边录边写
 - 分析 tap：与呈现完全独立，「忙则丢帧」，绝不阻塞解码
 - 遥测：端到端延迟 p50 / p99、丢帧、分析吞吐
+- 音频走 UDP（`kFlagAudio`），A 端解码播放，音画按采样数对齐
+- RTMP / SRT 推流：ffmpeg 子进程 + 匿名管道，`-c copy` 零转码
 
 ## 快速开始
 
@@ -68,6 +70,10 @@ duocapd --stream --target 127.0.0.1 --record capture.mkv --audio
 
 # A 端启用分析 tap（下游 CV/OCR 消费者）
 duocapv --play --analyze
+
+# 推流（需要系统里有 ffmpeg）
+duocapd --stream --target 127.0.0.1 --audio --push "rtmp://live.example.com/app/key"
+duocapd --stream --target 127.0.0.1 --audio --push "srt://1.2.3.4:9000?mode=caller"
 ```
 
 端口默认 50000（视频）/ 50001（控制）。避开 5000，Windows 上该端口常被系统服务占用。

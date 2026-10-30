@@ -28,8 +28,14 @@ class MkvMuxer {
   MkvMuxer(const MkvMuxer&) = delete;
   MkvMuxer& operator=(const MkvMuxer&) = delete;
 
+  // 输出目标：写文件，或把字节交给回调（推流时用回调直接进管道）。
+  using Sink = void (*)(void* user, const u8* data, std::size_t size);
+
   // 打开输出文件。第一帧必须是关键帧（带 SPS/PPS），否则无法写轨道头。
   Status open(const std::string& path, Codec codec, u32 width, u32 height, u32 fps);
+
+  // 打开到回调 sink。所有写出的字节按顺序交给 sink。
+  Status open_sink(Sink sink, void* user, Codec codec, u32 width, u32 height, u32 fps);
 
   // 启用音轨（必须在 write_frame 之前调用）。audio_private 是
   // AudioSpecificConfig（2 字节）。
@@ -45,7 +51,7 @@ class MkvMuxer {
   Status close();
   void abort();
 
-  [[nodiscard]] bool is_open() const noexcept { return file_ != nullptr; }
+  [[nodiscard]] bool is_open() const noexcept { return file_ != nullptr || sink_ != nullptr; }
   [[nodiscard]] u64 frames_written() const noexcept { return frames_written_; }
   [[nodiscard]] u64 bytes_written() const noexcept { return bytes_written_; }
 
@@ -53,10 +59,13 @@ class MkvMuxer {
   Status write_header(Codec codec, u32 width, u32 height);
   Status start_cluster(u64 timecode_ms);
   void write_element(u32 id, ByteSpan payload);
+  void emit(const u8* data, std::size_t size);
   void write_element_id(u32 id);
   void write_vint_size(u64 size);
 
   std::FILE* file_ = nullptr;
+  Sink sink_ = nullptr;
+  void* sink_user_ = nullptr;
   Codec codec_ = Codec::Hevc;
   u32 width_ = 0;
   u32 height_ = 0;

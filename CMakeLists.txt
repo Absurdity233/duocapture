@@ -41,7 +41,10 @@ add_library(duocore STATIC
   src/present/swapchain_presenter.cpp
   src/audio/wasapi_loopback.cpp
   src/audio/aac_encoder.cpp
+  src/audio/aac_decoder.cpp
+  src/audio/wasapi_render.cpp
   src/record/mkv_muxer.cpp
+  src/record/stream_pusher.cpp
   src/pipeline/sender.cpp
   src/pipeline/analysis_tap.cpp
   src/pipeline/receiver.cpp
