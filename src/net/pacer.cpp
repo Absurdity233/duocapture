@@ -1,0 +1,50 @@
+#include "duocapture/net/pacer.h"
+
+#include <algorithm>
+
+namespace duo {
+
+Pacer::Pacer(u64 bytes_per_second, u64 burst_bytes)
+    : bytes_per_second_(bytes_per_second == 0 ? 1 : bytes_per_second) {
+  burst_ = burst_bytes != 0 ? static_cast<double>(burst_bytes)
+                            : static_cast<double>(bytes_per_second_) / 1000.0;  // 1 ms
+  burst_ = std::max(burst_, static_cast<double>(kMaxPacketSize * 2));
+  tokens_ = burst_;
+}
+
+void Pacer::set_bitrate(u64 bytes_per_second) noexcept {
+  bytes_per_second_ = bytes_per_second == 0 ? 1 : bytes_per_second;
+}
+
+void Pacer::enqueue(Packet packet) { queue_.push_back(std::move(packet)); }
+
+void Pacer::refill(u64 now_ns) noexcept {
+  if (last_ns_ == 0) {
+    last_ns_ = now_ns;
+    return;
+  }
+  if (now_ns <= last_ns_) {
+    return;
+  }
+  const double elapsed_s = static_cast<double>(now_ns - last_ns_) / 1e9;
+  last_ns_ = now_ns;
+  tokens_ = std::min(burst_, tokens_ + elapsed_s * static_cast<double>(bytes_per_second_));
+}
+
+std::size_t Pacer::poll(u64 now_ns, Packet* out, std::size_t max_out) {
+  refill(now_ns);
+
+  std::size_t produced = 0;
+  while (produced < max_out && !queue_.empty()) {
+    const double cost = static_cast<double>(queue_.front().total_size());
+    if (tokens_ < cost) {
+      break;
+    }
+    tokens_ -= cost;
+    out[produced++] = std::move(queue_.front());
+    queue_.pop_front();
+  }
+  return produced;
+}
+
+}  // namespace duo

@@ -1,0 +1,40 @@
+# build
+build/
+out/
+cmake-build-*/
+CMakeUserPresets.json
+
+# visual studio
+.vs/
+*.vcxproj
+*.vcxproj.*
+*.sln
+*.user
+
+# binaries
+*.exe
+*.dll
+*.lib
+*.pdb
+*.ilk
+*.obj
+*.exp
+*.iobj
+*.ipdb
+
+# ida
+*.i64
+*.idb
+*.til
+
+# media artifacts
+*.mp4
+*.mkv
+*.y4m
+*.h265
+*.hevc
+
+# misc
+.DS_Store
+Thumbs.db
+*.log
