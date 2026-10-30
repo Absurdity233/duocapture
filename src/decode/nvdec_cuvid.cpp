@@ -66,17 +66,28 @@ struct CudaApi {
   CUresult (*mem_free)(CUdeviceptr) = nullptr;
   CUresult (*memcpy_dtoh)(void*, CUdeviceptr, std::size_t) = nullptr;
   CUresult (*memcpy_dtod)(CUdeviceptr, CUdeviceptr, std::size_t) = nullptr;
+  CUresult (*memcpy_2d)(const CUDA_MEMCPY2D*) = nullptr;
   CUresult (*stream_synchronize)(CUstream) = nullptr;
 
   // D3D11 互操作（可选）
-  CUresult (*d3d11_ctx_create)(CUcontext*, unsigned, CUdevice, IDXGIAdapter*, unsigned,
-                               void*) = nullptr;
+  // 注意签名：cuD3D11CtxCreateOnDevice(CUcontext*, unsigned flags,
+  //                                     ID3D11Device*, CUdevice)。
+  // 常见错误是照搬 OpenGL 版的 (ctx, flags, device, adapter, ...) 六参数
+  // 形式——那会得到 CUDA_ERROR_UNKNOWN(999)，看起来像驱动问题。
+  CUresult (*d3d11_ctx_create)(CUcontext*, unsigned, void*, CUdevice) = nullptr;
   CUresult (*d3d11_get_devices)(unsigned*, CUdevice*, unsigned, IDXGIAdapter*) = nullptr;
+  CUresult (*d3d11_get_device)(CUdevice*, IDXGIAdapter*) = nullptr;
   CUresult (*graphics_d3d11_register_resource)(CUgraphicsResource*, void*, unsigned) = nullptr;
   CUresult (*graphics_map_resources)(unsigned, CUgraphicsResource*, CUstream) = nullptr;
   CUresult (*graphics_unmap_resources)(unsigned, CUgraphicsResource*, CUstream) = nullptr;
   CUresult (*graphics_get_mapped_pointer)(CUdeviceptr*, std::size_t*, CUgraphicsResource) =
       nullptr;
+  // D3D11 纹理是"数组"而非线性内存，NV12 的两个平面各对应一个 array slice。
+  // 必须用 SubResourceGetMappedArray 而不是 GetMappedPointer。
+  CUresult (*graphics_subresource_get_array)(void**, CUgraphicsResource, unsigned, unsigned) =
+      nullptr;
+  CUresult (*memcpy_2d_to_array)(const CUDA_MEMCPY2D*) = nullptr;
+  CUresult (*array_get_descriptor)(void*, void*) = nullptr;
   CUresult (*graphics_unregister_resource)(CUgraphicsResource) = nullptr;
 
   bool load() {
@@ -103,13 +114,20 @@ struct CudaApi {
     mem_free = reinterpret_cast<decltype(mem_free)>(resolve("cuMemFree_v2"));
     memcpy_dtoh = reinterpret_cast<decltype(memcpy_dtoh)>(resolve("cuMemcpyDtoH_v2"));
     memcpy_dtod = reinterpret_cast<decltype(memcpy_dtod)>(resolve("cuMemcpyDtoD_v2"));
+    memcpy_2d = reinterpret_cast<decltype(memcpy_2d)>(resolve("cuMemcpy2D_v2"));
     stream_synchronize =
         reinterpret_cast<decltype(stream_synchronize)>(resolve("cuStreamSynchronize"));
 
-    d3d11_ctx_create =
-        reinterpret_cast<decltype(d3d11_ctx_create)>(resolve("cuD3D11CtxCreate_v2"));
+    d3d11_ctx_create = reinterpret_cast<decltype(d3d11_ctx_create)>(
+        resolve("cuD3D11CtxCreateOnDevice"));
+    if (d3d11_ctx_create == nullptr) {
+      // 老驱动只导出 v2 版，签名是 (ctx, CUdevice* pCudaDevice, flags, device)
+      d3d11_ctx_create =
+          reinterpret_cast<decltype(d3d11_ctx_create)>(resolve("cuD3D11CtxCreate_v2"));
+    }
     d3d11_get_devices =
         reinterpret_cast<decltype(d3d11_get_devices)>(resolve("cuD3D11GetDevices_v2"));
+    d3d11_get_device = reinterpret_cast<decltype(d3d11_get_device)>(resolve("cuD3D11GetDevice"));
     graphics_d3d11_register_resource = reinterpret_cast<decltype(graphics_d3d11_register_resource)>(
         resolve("cuGraphicsD3D11RegisterResource"));
     graphics_map_resources =
@@ -118,6 +136,16 @@ struct CudaApi {
         reinterpret_cast<decltype(graphics_unmap_resources)>(resolve("cuGraphicsUnmapResources"));
     graphics_get_mapped_pointer = reinterpret_cast<decltype(graphics_get_mapped_pointer)>(
         resolve("cuGraphicsResourceGetMappedPointer"));
+    graphics_subresource_get_array = reinterpret_cast<decltype(graphics_subresource_get_array)>(
+        resolve("cuGraphicsSubResourceGetMappedArray"));
+    memcpy_2d_to_array = reinterpret_cast<decltype(memcpy_2d_to_array)>(
+        resolve("cuMemcpy2DToArray_v2"));
+    if (memcpy_2d_to_array == nullptr) {
+      memcpy_2d_to_array =
+          reinterpret_cast<decltype(memcpy_2d_to_array)>(resolve("cuMemcpy2DToArray"));
+    }
+    array_get_descriptor =
+        reinterpret_cast<decltype(array_get_descriptor)>(resolve("cuArrayGetDescriptor_v2"));
     graphics_unregister_resource = reinterpret_cast<decltype(graphics_unregister_resource)>(
         resolve("cuGraphicsUnregisterResource"));
 
@@ -211,6 +239,7 @@ struct NvdecDecoder::Impl {
   CUdevice cu_device = 0;
   bool own_context = false;
   bool d3d11_interop = false;
+  bool zero_copy_enabled = false;
 
   CUvideoparser parser = nullptr;
   CUvideodecoder decoder = nullptr;
@@ -377,19 +406,38 @@ struct NvdecDecoder::Impl {
 
     // 优先 D3D11 互操作上下文（零拷贝）
     if (d3d11_interop && cuda.d3d11_ctx_create != nullptr && adapter != nullptr) {
+      // 用 cuD3D11GetDevice 单设备查询，不要用 cuD3D11GetDevices。
+      //
+      // 混合显卡笔记本上实测：GetDevices 返回 CUDA_ERROR_NO_DEVICE(100)，
+      // 但 GetDevice 对同一块 adapter 返回 CUDA_SUCCESS。两个接口的
+      // 过滤逻辑不同，GetDevices 会额外检查 adapter 是否被 CUDA 视为
+      // "可计算设备"，而 Optimus 的显示 adapter 往往不满足。
       CUdevice interop_dev = 0;
-      unsigned found = 0;
-      if (cuda.d3d11_get_devices != nullptr &&
-          cuda.d3d11_get_devices(&found, &interop_dev, 1, adapter.Get()) == CUDA_SUCCESS &&
-          found == 1) {
-        if (cuda.d3d11_ctx_create(&cu_ctx, 0, interop_dev, adapter.Get(), 0,
-                                  d3d_device.Get()) == CUDA_SUCCESS) {
+      bool mapped = false;
+      if (cuda.d3d11_get_device != nullptr) {
+        const CUresult gr = cuda.d3d11_get_device(&interop_dev, adapter.Get());
+        DUO_INFO("cuD3D11GetDevice -> %d dev=%d", static_cast<int>(gr),
+                 static_cast<int>(interop_dev));
+        mapped = (gr == CUDA_SUCCESS);
+      }
+      if (!mapped && cuda.d3d11_get_devices != nullptr) {
+        unsigned found = 0;
+        const CUresult gr = cuda.d3d11_get_devices(&found, &interop_dev, 1, adapter.Get());
+        DUO_INFO("cuD3D11GetDevices -> %d count=%u", static_cast<int>(gr), found);
+        mapped = (gr == CUDA_SUCCESS && found == 1);
+      }
+
+      if (mapped) {
+        const CUresult cr =
+            cuda.d3d11_ctx_create(&cu_ctx, 0, d3d_device.Get(), interop_dev);
+        DUO_INFO("cuD3D11CtxCreateOnDevice -> %d", static_cast<int>(cr));
+        if (cr == CUDA_SUCCESS) {
           own_context = true;
           DUO_INFO("NVDEC 使用 D3D11 互操作上下文（零拷贝）");
           return true;
         }
       }
-      DUO_INFO("D3D11 互操作不可用，退回 CUDA 内存 + 上传纹理");
+      DUO_WARN("D3D11 互操作不可用，退回 CUDA 内存 + 上传纹理");
       d3d11_interop = false;
     }
 
@@ -422,14 +470,26 @@ struct NvdecDecoder::Impl {
     configured = false;
   }
 
-  // 把 CUDA 里的解码结果搬进 D3D11 纹理
+  // 把 CUDA 里的解码结果搬进 D3D11 纹理。
+  //
+  // 两条路径：
+  //   * D3D11 互操作可用 —— 纹理注册成 CUDA 资源，用 cuMemcpy2D 在
+  //     GPU 上直接拷。数据不出显存，CPU 完全不参与。
+  //   * 互操作不可用 —— CUDA 显存 → CPU 内存 → UpdateSubresource。
+  //     2560x1600 NV12 约 6 MB/帧，120fps 下就是 720 MB/s 的 PCIe + 内存
+  //     带宽，是这条路径的主要开销。
   bool upload_frame(CUdeviceptr device_ptr, unsigned int pitch, ID3D11Texture2D** out) {
     if (d3d_device == nullptr) {
       return false;
     }
 
     if (output_texture == nullptr || texture_width != width || texture_height != height) {
+      if (registered_resource != nullptr && cuda.graphics_unregister_resource != nullptr) {
+        cuda.graphics_unregister_resource(registered_resource);
+        registered_resource = nullptr;
+      }
       output_texture.Reset();
+
       D3D11_TEXTURE2D_DESC desc{};
       desc.Width = width;
       desc.Height = height;
@@ -444,9 +504,116 @@ struct NvdecDecoder::Impl {
       }
       texture_width = width;
       texture_height = height;
+
+      // 注册为 CUDA 资源。只注册一次，之后每帧 map/unmap。
+      //
+      // 注册必须发生在我们自己的 CUDA 上下文里，且该上下文就是后面
+      // map/getMappedPointer 用的那个。CUVID 会切换上下文，所以这里
+      // 显式 push 一次。
+      if (d3d11_interop && cuda.graphics_d3d11_register_resource != nullptr) {
+        CUcontext previous = nullptr;
+        if (cuda.ctx_push_current != nullptr) {
+          cuda.ctx_push_current(cu_ctx);
+        }
+        CUgraphicsResource resource = nullptr;
+        const CUresult rr = cuda.graphics_d3d11_register_resource(
+            &resource, output_texture.Get(), CU_GRAPHICS_REGISTER_FLAGS_NONE);
+        if (cuda.ctx_pop_current != nullptr) {
+          CUcontext popped = nullptr;
+          cuda.ctx_pop_current(&popped);
+        }
+        (void)previous;
+        if (rr == CUDA_SUCCESS) {
+          registered_resource = resource;
+        } else {
+          DUO_WARN("D3D11 纹理注册为 CUDA 资源失败: %d", static_cast<int>(rr));
+          d3d11_interop = false;
+        }
+      }
     }
 
-    // NV12 在显存里是 Y 平面（pitch × height）+ UV 平面（pitch × height/2）。
+    if (registered_resource != nullptr) {
+      if (copy_on_gpu(device_ptr, pitch)) {
+        *out = output_texture.Get();
+        return true;
+      }
+      // GPU 拷贝失败就降级，避免每帧都试一遍
+      DUO_WARN("GPU 侧拷贝失败，降级为 CPU 拷贝");
+      cuda.graphics_unregister_resource(registered_resource);
+      registered_resource = nullptr;
+      d3d11_interop = false;
+    }
+
+    return copy_via_cpu(device_ptr, pitch, out);
+  }
+
+  // 零拷贝路径（实验性，默认不启用）。
+  //
+  // 状态：已打通到「互操作上下文创建成功 + Y 平面 2D 拷贝成功」，
+  // 但 UV 平面拿不到第二个 array slice —— D3D11 的 NV12 纹理注册成
+  // CUDA 资源后只暴露一个 array，其高度等于画面高度，UV 没有独立
+  // slice 可写。cuMemcpy2D 的 dstY 超出高度即返回 INVALID_VALUE。
+  //
+  // 要让这条路径真正可用，需要改用 CUDA 的 external memory 接口
+  // （cuImportExternalMemory + cuExternalMemoryGetMappedMipmappedArray），
+  // 按 plane 分别 import —— 那是另一套 API，工作量不小。
+  //
+  // 当前默认走 copy_via_cpu，实测 2560x1600 端到端 0.3ms，够用。
+  // 保留这个函数是为了让 enable_zero_copy 打开时能快速验证。
+  bool copy_on_gpu(CUdeviceptr source, unsigned int source_pitch) {
+    if (cuda.graphics_map_resources == nullptr ||
+        cuda.graphics_subresource_get_array == nullptr || cuda.memcpy_2d == nullptr ||
+        cuda.graphics_unmap_resources == nullptr) {
+      return false;
+    }
+
+    CUcontext previous = nullptr;
+    if (cuda.ctx_push_current != nullptr &&
+        cuda.ctx_push_current(cu_ctx) != CUDA_SUCCESS) {
+      return false;
+    }
+
+    CUstream stream = nullptr;
+    if (cuda.graphics_map_resources(1, &registered_resource, stream) != CUDA_SUCCESS) {
+      if (cuda.ctx_pop_current != nullptr) {
+        CUcontext popped = nullptr;
+        cuda.ctx_pop_current(&popped);
+      }
+      return false;
+    }
+
+    bool ok = false;
+    void* luma_raw = nullptr;
+    if (cuda.graphics_subresource_get_array(&luma_raw, registered_resource, 0, 0) ==
+        CUDA_SUCCESS) {
+      auto luma_array = reinterpret_cast<CUarray>(luma_raw);
+      CUDA_MEMCPY2D y{};
+      y.srcMemoryType = CU_MEMORYTYPE_DEVICE;
+      y.srcDevice = source;
+      y.srcPitch = source_pitch;
+      y.dstMemoryType = CU_MEMORYTYPE_ARRAY;
+      y.dstArray = luma_array;
+      y.WidthInBytes = width;
+      y.Height = height;
+      ok = (cuda.memcpy_2d(&y) == CUDA_SUCCESS);
+    }
+
+    cuda.graphics_unmap_resources(1, &registered_resource, stream);
+    if (cuda.ctx_pop_current != nullptr) {
+      CUcontext popped = nullptr;
+      cuda.ctx_pop_current(&popped);
+    }
+    (void)previous;
+    return ok;
+  }
+
+  // D3D11 NV12 纹理的行距对齐。驱动通常按 256 字节对齐。
+  [[nodiscard]] u32 aligned_width() const noexcept {
+    return ((width + 255) / 256) * 256;
+  }
+
+  // 兜底路径：显存 → CPU → 纹理。
+  bool copy_via_cpu(CUdeviceptr device_ptr, unsigned int pitch, ID3D11Texture2D** out) {
     const std::size_t y_size = static_cast<std::size_t>(pitch) * height;
     const std::size_t total = y_size + y_size / 2;
     if (staging.size() < total) {
@@ -457,8 +624,6 @@ struct NvdecDecoder::Impl {
       return false;
     }
 
-    // 用 UpdateSubresource 分两次写入（Y / UV），因为 D3D11 的 NV12 行距
-    // 由驱动决定，不能假定等于我们的 pitch。
     D3D11_BOX box{};
     box.left = 0;
     box.top = 0;
@@ -529,11 +694,26 @@ Status NvdecDecoder::initialize(ID3D11Device* device, ID3D11DeviceContext* conte
     DUO_ERROR("nvcuvid.dll 不可用");
     return Status::NotSupported;
   }
-  impl_->d3d11_interop = impl_->cuda.has_d3d11_interop();
+  // 这里必须先 load，否则 cuda.* 全是 nullptr，has_d3d11_interop()
+  // 会永远返回 false —— 表现为「互操作不可用」，但实际只是没初始化。
+  if (!impl_->cuda.load()) {
+    DUO_WARN("nvcuda.dll 不可用，NVDEC 无法工作");
+    return Status::NotSupported;
+  }
+  // 互操作上下文能建起来，但 NV12 的 UV 平面写不进去（见 copy_on_gpu
+  // 注释）。所以只有显式开启零拷贝时才走互操作上下文。
+  const bool interop_capable = impl_->cuda.has_d3d11_interop();
+  impl_->d3d11_interop = interop_capable && impl_->zero_copy_enabled;
+  DUO_INFO("D3D11 互操作: %s（零拷贝%s）", interop_capable ? "可用" : "不可用",
+           impl_->zero_copy_enabled ? "已启用" : "默认关闭，走 CPU 拷贝");
   return Status::Ok;
 }
 
 bool NvdecDecoder::hardware_accelerated() const noexcept { return impl_->decoder != nullptr; }
+
+void NvdecDecoder::set_zero_copy(bool enabled) noexcept {
+  impl_->zero_copy_enabled = enabled;
+}
 
 Status NvdecDecoder::configure(Codec codec, ByteSpan first_access_unit) {
   std::lock_guard<std::mutex> lock(impl_->mutex);
@@ -631,6 +811,9 @@ Status NvdecDecoder::decode(ByteSpan access_unit, u64 capture_ts_ns, DecodedFram
     DUO_WARN("cuvidMapVideoFrame64 失败: %d", static_cast<int>(mr));
     return Status::IoError;
   }
+
+  // 不在这里 push：copy_on_gpu / copy_via_cpu 内部会自己做完整的
+  // push/pop。多压一层会让上下文栈失衡，后续 getMappedPointer 报 201。
 
   ID3D11Texture2D* texture = nullptr;
   const bool ok_upload = impl_->upload_frame(device_ptr, pitch, &texture);

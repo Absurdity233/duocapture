@@ -50,6 +50,11 @@ class NvdecDecoder final : public IDecoder {
   [[nodiscard]] const char* backend_name() const override { return "nvdec-cuvid"; }
   [[nodiscard]] bool hardware_accelerated() const noexcept;
 
+  // 是否尝试 D3D11 零拷贝。默认关闭：NV12 的 UV 平面拿不到第二个
+  // CUDA array slice，这条路径目前只对 Y 平面有效。关闭时走
+  // CUDA 显存 → CPU → UpdateSubresource，实测够用。
+  void set_zero_copy(bool enabled) noexcept;
+
  private:
   struct Impl;
   std::unique_ptr<Impl> impl_;
