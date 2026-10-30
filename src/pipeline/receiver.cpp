@@ -26,6 +26,10 @@ Status Receiver::start(const ReceiverConfig& config) {
   }
 
   config_ = config;
+  // set_analysis_plugin 是「强制开启」语义，不能被传入的 config 覆盖掉
+  if (analysis_forced_) {
+    config_.enable_analysis = true;
+  }
   stop_requested_.store(false, std::memory_order_release);
   window_closed_.store(false, std::memory_order_release);
 
@@ -74,6 +78,11 @@ Status Receiver::start(const ReceiverConfig& config) {
       } else {
         DUO_WARN("遥测 overlay 初始化失败: %s", to_string(os));
       }
+    }
+
+    // 把 D3D 设备交给插件（插件可能要跑 GPU 推理或读回纹理）
+    if (device_ready_fn_ != nullptr) {
+      device_ready_fn_(device_ready_user_, presenter_->device(), presenter_->context());
     }
 
     status = decoder_->bind_device(presenter_->device(), presenter_->context());
@@ -511,6 +520,20 @@ Win32Presenter* Receiver::presenter() noexcept { return presenter_.get(); }
 void Receiver::set_analysis_callback(AnalysisTap::Callback callback, void* user) {
   analysis_callback_ = callback;
   analysis_user_ = user;
+}
+
+void Receiver::set_device_ready_callback(void (*fn)(void* user, void* device, void* context),
+                                         void* user) {
+  device_ready_fn_ = fn;
+  device_ready_user_ = user;
+}
+
+void Receiver::set_analysis_plugin(void* adapter, AnalysisTap::Callback thunk, void* user) {
+  (void)adapter;
+  analysis_callback_ = thunk;
+  analysis_user_ = user;
+  config_.enable_analysis = true;
+  analysis_forced_ = true;
 }
 
 }  // namespace duo

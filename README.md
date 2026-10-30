@@ -5,7 +5,7 @@
 面向「游戏机 + 推流机」这类双机直播与录制场景。全程硬件编解码，不注入进程、不 hook 图形 API。
 
 ```
-2560×1600 @30fps 实测：编码 2.9 ms · 解码+呈现 0.3 ms · 32 个单测全通过
+2560×1600 @30fps 实测：编码 2.9 ms · 解码+呈现 0.3 ms · 37 个单测全通过
 ```
 
 ## 特性
@@ -46,6 +46,7 @@
 | 零转码录制 | Annex-B → MKV，CPU 开销接近零，含音轨 |
 | RTMP / SRT 推流 | ffmpeg 子进程 + 匿名管道，`-c copy` **零转码** |
 | 分析 tap | 独立线程 + 最新帧覆盖，永不阻塞解码 |
+| **插件系统** | 分析逻辑做成独立 DLL，纯 C ABI，不改主程序即可扩展 |
 | 遥测 overlay | 延迟 p50/p99、抖动、丢帧、FEC 恢复率直接叠在画面上 |
 
 ## 快速开始
@@ -154,6 +155,9 @@ build\duocapd.exe --stream --target 192.168.10.2 --audio ^
 | `--peer-control-port <端口>` | 对端控制端口，默认 50001 |
 | `--overlay` | 画面上叠加延迟/丢帧统计 |
 | `--analyze` | 启用分析 tap |
+| `--plugin-dir <目录>` | 加载该目录下的插件 DLL |
+| `--plugin <名称>` | 指定插件（默认用第一个分析插件） |
+| `--plugin-config <串>` | 传给插件的配置字符串 |
 
 ## 架构
 
@@ -223,10 +227,10 @@ glass-to-glass 必须用 240 fps 相机拍两块屏幕上的毫秒计时器来�
 ## 开发
 
 ```bash
-build\duo_tests.exe        # 32 个单元测试
+build\duo_tests.exe        # 37 个单元测试
 ```
 
-测试覆盖：环形队列、协议打包、FEC 恢复、限速器、抖动缓冲（含自适应）、SPS 解析、分析 tap 丢帧语义、NACK 区间压缩、控制通道序列化。
+测试覆盖：环形队列、协议打包、FEC 恢复、限速器、抖动缓冲（含自适应）、SPS 解析、分析 tap 丢帧语义、NACK 区间压缩、控制通道序列化、插件 ABI 校验。
 
 ```
 include/duocapture/     公共接口
@@ -235,6 +239,7 @@ include/duocapture/     公共接口
   decode/               解码器接口、SPS 解析
   net/                  协议、FEC、限速、抖动缓冲、传输、控制通道
   present/              呈现器、遥测 overlay
+  plugin/               插件 ABI 与宿主
   record/               MKV 封装、推流
   audio/                WASAPI 采集/播放、AAC 编解码
   pipeline/             Sender / Receiver / 分析 tap
@@ -242,11 +247,12 @@ src/                    实现
 apps/duocapd            B 端程序
 apps/duocapv            A 端程序
 tests/                  单元测试
-docs/                   设计文档
+plugins/luma_stats/     示例插件（平均亮度 + 黑帧检测）
+docs/                   设计文档（含 plugins.md 插件开发指南）
 third_party/            nv-codec-headers（仅头文件，用于 NVENC/CUVID 声明）
 ```
 
-约 10,700 行 C++20。
+约 11,500 行 C++20。
 
 ## 合规
 

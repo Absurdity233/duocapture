@@ -19,6 +19,7 @@
 #include "duocapture/net/jitter_buffer.h"
 #include "duocapture/net/packet.h"
 #include "duocapture/net/transport.h"
+#include "duocapture/plugin/plugin_host.h"
 #include "duocapture/pipeline/receiver.h"
 #include "duocapture/pipeline/selftest.h"
 
@@ -147,6 +148,9 @@ void sample_analyze(void* user, const duo::DecodedFrame& frame) {
 
 int run_play(int argc, char** argv) {
   duo::ReceiverConfig config;
+  std::string plugin_dir;
+  std::string plugin_name;
+  std::string plugin_config;
 
   for (int i = 2; i < argc; ++i) {
     const std::string arg = argv[i];
@@ -164,6 +168,12 @@ int run_play(int argc, char** argv) {
       config.enable_analysis = true;
     } else if (arg == "--overlay") {
       config.show_overlay = true;
+    } else if (arg == "--plugin-dir" && has_next) {
+      plugin_dir = argv[++i];
+    } else if (arg == "--plugin" && has_next) {
+      plugin_name = argv[++i];
+    } else if (arg == "--plugin-config" && has_next) {
+      plugin_config = argv[++i];
     } else if (arg == "--peer" && has_next) {
       config.peer_host = argv[++i];
     } else if (arg == "--peer-control-port" && has_next) {
@@ -173,9 +183,46 @@ int run_play(int argc, char** argv) {
 
   duo::Receiver receiver;
   std::atomic<duo::u64> analyzed{0};
-  if (config.enable_analysis) {
+
+  // 插件：必须在 receiver.start 之前创建，且适配器要活到 receiver 停止之后
+  duo::PluginHost plugin_host;
+  std::shared_ptr<duo::PluginHost::AnalysisAdapter> adapter;
+
+  if (!plugin_dir.empty()) {
+    plugin_host.initialize(nullptr, nullptr);
+    const std::size_t n = plugin_host.load_directory(plugin_dir);
+    std::printf("从 %s 加载了 %zu 个插件\n", plugin_dir.c_str(), n);
+    for (const auto& info : plugin_host.plugins()) {
+      std::printf("  [%s] %s v%s %s\n", info.compatible ? "OK" : "跳过", info.name.c_str(),
+                  info.version.c_str(), info.compatible ? info.description.c_str()
+                                                       : info.error.c_str());
+    }
+
+    if (plugin_name.empty()) {
+      adapter = plugin_host.create_first_analysis(plugin_config);
+    } else {
+      adapter = plugin_host.create_analysis(plugin_name, plugin_config);
+    }
+    if (adapter) {
+      std::printf("使用分析插件: %s\n", adapter->plugin_name().c_str());
+    } else {
+      std::printf("没有可用的分析插件\n");
+    }
+  }
+
+  if (adapter) {
+    // 呈现器建好后把 D3D 设备转给插件（插件读回纹理需要它）
+    receiver.set_device_ready_callback(
+        [](void* user, void* device, void* context) {
+          static_cast<duo::PluginHost*>(user)->set_d3d_device(device, context);
+        },
+        &plugin_host);
+    receiver.set_analysis_plugin(adapter.get(), &duo::PluginHost::AnalysisAdapter::frame_thunk,
+                                 adapter->user_ptr());
+  } else if (config.enable_analysis) {
     receiver.set_analysis_callback(&sample_analyze, &analyzed);
   }
+
   duo::Status status = receiver.start(config);
   if (!duo::ok(status)) {
     std::printf("启动接收端失败: %s\n", duo::to_string(status));
@@ -211,6 +258,11 @@ int run_play(int argc, char** argv) {
   }
 
   receiver.stop();
+  if (adapter) {
+    std::printf("插件统计: 成功 %llu 帧, 失败 %llu 帧\n",
+                static_cast<unsigned long long>(adapter->frames_ok()),
+                static_cast<unsigned long long>(adapter->frames_failed()));
+  }
   return 0;
 }
 

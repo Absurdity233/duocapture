@@ -48,6 +48,7 @@ add_library(duocore STATIC
   src/record/mkv_muxer.cpp
   src/record/stream_pusher.cpp
   src/pipeline/sender.cpp
+  src/plugin/plugin_host.cpp
   src/pipeline/analysis_tap.cpp
   src/pipeline/receiver.cpp
   src/pipeline/selftest.cpp
@@ -106,6 +107,26 @@ target_link_libraries(duocapd PRIVATE duocore)
 add_executable(duocapv apps/duocapv/main.cpp)
 target_link_libraries(duocapv PRIVATE duocore)
 
+# ---------------------------------------------------------------- plugins
+# 插件是独立 DLL，只依赖 plugin_api.h，不链接 duocore。
+option(DUO_BUILD_EXAMPLE_PLUGINS "Build example plugins" ON)
+
+if(DUO_BUILD_EXAMPLE_PLUGINS)
+  add_library(duo_plugin_luma_stats MODULE plugins/luma_stats/luma_stats.cpp)
+  target_include_directories(duo_plugin_luma_stats PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+  set_target_properties(duo_plugin_luma_stats PROPERTIES
+    PREFIX ""            # Windows 上不需要 lib 前缀
+    OUTPUT_NAME "duo_plugin_luma_stats"
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/plugins"
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/plugins"
+  )
+  if(WIN32)
+    target_compile_definitions(duo_plugin_luma_stats PRIVATE
+      WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WINNT=0x0A00 UNICODE _UNICODE)
+    target_link_libraries(duo_plugin_luma_stats PRIVATE d3d11 dxgi)
+  endif()
+endif()
+
 # ---------------------------------------------------------------- tests
 if(DUO_BUILD_TESTS)
   enable_testing()
@@ -116,6 +137,7 @@ if(DUO_BUILD_TESTS)
     tests/pipeline_tests.cpp
     tests/control_tests.cpp
     tests/jitter_adaptive_tests.cpp
+    tests/plugin_tests.cpp
   )
   target_link_libraries(duo_tests PRIVATE duocore)
   add_test(NAME duo_tests COMMAND duo_tests)

@@ -107,6 +107,13 @@ class Receiver {
   // 设置分析回调（须在 start 之前调用）。
   void set_analysis_callback(AnalysisTap::Callback callback, void* user);
 
+  // 用插件适配器替代内建回调。传入后 enable_analysis 自动打开。
+  // 适配器由调用方持有，生命周期必须覆盖 Receiver。
+  void set_analysis_plugin(void* adapter, AnalysisTap::Callback thunk, void* user);
+
+  // 呈现器建好后回调，用于把 D3D 设备交给插件。
+  void set_device_ready_callback(void (*fn)(void* user, void* device, void* context), void* user);
+
   [[nodiscard]] Win32Presenter* presenter() noexcept;
 
  private:
@@ -160,6 +167,11 @@ class Receiver {
   u32 height_ = 0;
   bool decoder_configured_ = false;
   bool seen_keyframe_ = false;
+  // set_analysis_plugin 设的强制标志：start() 里 config_ 会被整体覆盖，
+  // 必须单独记住，否则插件永远收不到帧。
+  bool analysis_forced_ = false;
+  void (*device_ready_fn_)(void*, void*, void*) = nullptr;
+  void* device_ready_user_ = nullptr;
   u32 frames_since_start_ = 0;
 };
 
