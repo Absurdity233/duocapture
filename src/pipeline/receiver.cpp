@@ -415,6 +415,10 @@ void Receiver::render_loop() {
         std::snprintf(buf, sizeof(buf), "%llu",
                       static_cast<unsigned long long>(snapshot.packets_recovered_by_fec));
         lines.push_back({"fec recovered", buf});
+        std::snprintf(buf, sizeof(buf), "%.1f ms", snapshot.arrival_jitter_ms);
+        lines.push_back({"jitter", buf});
+        std::snprintf(buf, sizeof(buf), "%u ms", snapshot.nack_delay_ms);
+        lines.push_back({"nack delay", buf});
         std::snprintf(buf, sizeof(buf), "%llu",
                       static_cast<unsigned long long>(snapshot.decoder_errors));
         lines.push_back({"decode errors", buf});
@@ -492,6 +496,9 @@ ReceiverStats Receiver::stats() const {
   out.frames_dropped = std::max(out.frames_dropped, jitter_.stats().frames_dropped);
   out.frames_analyzed = analysis_.frames_analyzed();
   out.frames_analysis_dropped = analysis_.frames_dropped();
+  out.arrival_jitter_ms = jitter_.stats().arrival_jitter_ms;
+  out.nack_delay_ms = jitter_.stats().effective_nack_delay_ms;
+  out.nacks_issued = jitter_.stats().nacks_issued;
   out.audio_frames = stats_.audio_frames;
   out.audio_decode_errors = stats_.audio_decode_errors;
   out.p50_end_to_end_ms = latency_stats_.percentile(0.5);

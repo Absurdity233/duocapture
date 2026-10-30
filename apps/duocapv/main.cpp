@@ -195,13 +195,14 @@ int run_play(int argc, char** argv) {
     if (now - last_report >= std::chrono::seconds(1)) {
       const duo::ReceiverStats stats = receiver.stats();
       std::printf("收包 %llu  组装 %llu  呈现 %llu  丢帧 %llu  解码错误 %llu  %.1f fps  "
-                  "端到端 p50 %.1f / p99 %.1f ms  分析 %llu(丢 %llu)  音频 %llu\n",
+                  "端到端 p50 %.1f / p99 %.1f ms  抖动 %.1f ms  "
+                  "分析 %llu(丢 %llu)  音频 %llu\n",
                   static_cast<unsigned long long>(stats.datagrams_received),
                   static_cast<unsigned long long>(stats.frames_assembled),
                   static_cast<unsigned long long>(stats.frames_presented),
                   static_cast<unsigned long long>(stats.frames_dropped),
                   static_cast<unsigned long long>(stats.decoder_errors), stats.receive_fps,
-                  stats.p50_end_to_end_ms, stats.p99_end_to_end_ms,
+                  stats.p50_end_to_end_ms, stats.p99_end_to_end_ms, stats.arrival_jitter_ms,
                   static_cast<unsigned long long>(stats.frames_analyzed),
                   static_cast<unsigned long long>(stats.frames_analysis_dropped),
                   static_cast<unsigned long long>(stats.audio_frames));

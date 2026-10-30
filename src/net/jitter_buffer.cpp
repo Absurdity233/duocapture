@@ -1,6 +1,7 @@
 #include "duocapture/net/jitter_buffer.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 
 #include "duocapture/common/clock.h"
@@ -10,10 +11,53 @@
 namespace duo {
 
 JitterBuffer::JitterBuffer(std::size_t window_frames, u32 nack_delay_ms)
-    : window_frames_(window_frames == 0 ? 1 : window_frames), nack_delay_ms_(nack_delay_ms) {}
+    : window_frames_(window_frames == 0 ? 1 : window_frames), nack_delay_ms_(nack_delay_ms) {
+  stats_.effective_nack_delay_ms = nack_delay_ms;
+}
+
+void JitterBuffer::update_arrival_jitter(u64 now_ns) {
+  if (last_arrival_ns_ == 0) {
+    last_arrival_ns_ = now_ns;
+    return;
+  }
+  const double interval = static_cast<double>(now_ns - last_arrival_ns_);
+  last_arrival_ns_ = now_ns;
+
+  // 前 16 个包用来建立"期望间隔"的基线，之后才开始算抖动。
+  // 直接用第一个间隔当基线会把启动时的突发误判成巨大抖动。
+  if (jitter_samples_ < 16) {
+    expected_interval_ns_ = (expected_interval_ns_ * static_cast<double>(jitter_samples_) +
+                             interval) /
+                            static_cast<double>(jitter_samples_ + 1);
+    ++jitter_samples_;
+    return;
+  }
+
+  // RFC 3550 的抖动估计：J += (|D| - J) / 16
+  const double deviation = std::abs(interval - expected_interval_ns_);
+  jitter_ns_ += (deviation - jitter_ns_) / 16.0;
+
+  // 期望间隔也缓慢跟随（网络条件变化时能收敛）
+  expected_interval_ns_ += (interval - expected_interval_ns_) / 64.0;
+
+  stats_.arrival_jitter_ms = jitter_ns_ / 1e6;
+
+  // NACK 延迟自适应：抖动越大，等得越久（给乱序包更多时间自己到齐，
+  // 少发无效 NACK）。下限 2ms，上限 20ms。
+  //   delay = clamp(2 + 2 * jitter, 2, 20)
+  if (fixed_nack_delay_ms_ != 0) {
+    stats_.effective_nack_delay_ms = fixed_nack_delay_ms_;
+  } else {
+    const double jitter_ms = jitter_ns_ / 1e6;
+    const double adaptive = 2.0 + 2.0 * jitter_ms;
+    const double clamped = adaptive < 2.0 ? 2.0 : (adaptive > 20.0 ? 20.0 : adaptive);
+    stats_.effective_nack_delay_ms = static_cast<u32>(clamped);
+  }
+}
 
 void JitterBuffer::insert(Packet packet) {
   ++stats_.packets_received;
+  update_arrival_jitter(Clock::now_ns());
 
   const u32 frame_id = packet.header.frame_id;
 
@@ -140,7 +184,7 @@ bool JitterBuffer::try_pop(AssembledFrame& out) {
 
 std::vector<std::pair<u32, u16>> JitterBuffer::collect_nacks(u64 now_ns) {
   std::vector<std::pair<u32, u16>> missing;
-  const u64 delay_ns = static_cast<u64>(nack_delay_ms_) * 1'000'000ull;
+  const u64 delay_ns = static_cast<u64>(stats_.effective_nack_delay_ms) * 1'000'000ull;
 
   for (auto& [frame_id, entry] : frames_) {
     if (entry.complete || entry.pkt_count == 0) {

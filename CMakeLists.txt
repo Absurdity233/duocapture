@@ -115,6 +115,7 @@ if(DUO_BUILD_TESTS)
     tests/sps_tests.cpp
     tests/pipeline_tests.cpp
     tests/control_tests.cpp
+    tests/jitter_adaptive_tests.cpp
   )
   target_link_libraries(duo_tests PRIVATE duocore)
   add_test(NAME duo_tests COMMAND duo_tests)

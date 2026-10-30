@@ -73,6 +73,11 @@ struct ReceiverStats {
   u64 audio_frames = 0;
   u64 audio_decode_errors = 0;
 
+  // 网络质量
+  double arrival_jitter_ms = 0.0;
+  u32 nack_delay_ms = 0;
+  u64 nacks_issued = 0;
+
   // 延迟分布
   double p50_end_to_end_ms = 0.0;
   double p99_end_to_end_ms = 0.0;

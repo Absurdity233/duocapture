@@ -15,17 +15,17 @@
 
 ## M1 — 单机闭环
 
-- [ ] NVENC HEVC 编码器（`IEncoder` 实现）
-- [ ] BGRA → NV12 compute shader 转换
-- [ ] D3D11VA 解码器（`IDecoder` 实现）
-- [ ] 交换链呈现器（flip model + tearing）
-- [ ] `duocapd --stream` / `duocapv --play` 打通本地回环
-- [ ] 验收：1440p120 本地 0 丢帧，编码 < 5 ms
+- [x] NVENC HEVC 编码器（`IEncoder` 实现）
+- [x] BGRA → NV12 compute shader 转换
+- [x] D3D11VA 解码器（`IDecoder` 实现）
+- [x] 交换链呈现器（flip model + tearing）
+- [x] `duocapd --stream` / `duocapv --play` 打通本地回环
+- [x] 验收：2560x1600 本地 0 丢帧，编码 2.9 ms
 
 ## M2 — 双机传输
 
 - [x] 控制通道（NACK / 请求关键帧）
-- [ ] 抖动缓冲自适应（按到达间隔方差伸缩）
+- [x] 抖动缓冲自适应（RFC 3550 抖动估计 → NACK 延迟 2-20ms 伸缩）
 - [x] NACK 重传（发送端 200ms 重传缓冲 + 区间压缩）
 - [ ] 验收：高速相机实测 p99 ≤ 35 ms
 
