@@ -12,7 +12,7 @@
 | M1 | WGC/DDAPI 采集 + NV12 转换 + NVENC 编码 + 解码 + 呈现 | ✅ 已完成 |
 | M2 | 双机 UDP 传输 + FEC + 限速 + 抖动缓冲 + 编解码协商 | ✅ 已完成 |
 | M3 | 音频（采集/传输/播放）+ 零转码 MKV 录制 + RTMP/SRT 推流 | ✅ 已完成 |
-| M4 | 分析 tap（忙则丢帧）+ 遥测（p50/p99） | ✅ 已完成 |
+| M4 | 分析 tap + 遥测（p50/p99）+ 画面 overlay | ✅ 已完成 |
 
 **已实现（可直接运行、有单测覆盖）**
 
@@ -37,6 +37,8 @@
 - 遥测：端到端延迟 p50 / p99、丢帧、分析吞吐
 - 音频走 UDP（`kFlagAudio`），A 端解码播放，音画按采样数对齐
 - RTMP / SRT 推流：ffmpeg 子进程 + 匿名管道，`-c copy` 零转码
+- 控制通道：NACK 重传（区间压缩）+ 请求关键帧
+- 遥测 overlay：延迟/丢包/FEC 统计直接叠在画面上
 
 ## 快速开始
 
@@ -68,8 +70,11 @@ duocapd --stream --playback capture.h264 --target 127.0.0.1
 # 录制（零转码 MKV，含系统声音）
 duocapd --stream --target 127.0.0.1 --record capture.mkv --audio
 
-# A 端启用分析 tap（下游 CV/OCR 消费者）
-duocapv --play --analyze
+# A 端启用分析 tap（下游 CV/OCR 消费者）与画面统计
+duocapv --play --analyze --overlay
+
+# A 端回传 NACK / 请求关键帧（填发送端地址）
+duocapv --play --peer 192.168.10.1
 
 # 推流（需要系统里有 ffmpeg）
 duocapd --stream --target 127.0.0.1 --audio --push "rtmp://live.example.com/app/key"

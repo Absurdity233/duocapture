@@ -42,6 +42,9 @@ Status Sender::start(const SenderConfig& config) {
   if (config_.capture_audio) {
     audio_thread_ = std::thread([this] { audio_loop(); });
   }
+  if (control_socket_.is_open()) {
+    control_thread_ = std::thread([this] { control_loop(); });
+  }
 
   DUO_INFO("发送端已启动: %ux%u @%u, %u Mbps, -> %s:%u",
            width_, height_, config_.fps, config_.bitrate_bps / 1'000'000,
@@ -131,6 +134,13 @@ Status Sender::setup_pipeline() {
     return Status::NotSupported;
   }
   socket_.set_send_buffer(8u * 1024u * 1024u);
+
+  // 控制通道：接收端往这个端口发 NACK / 请求关键帧
+  status = control_socket_.open("0.0.0.0", config_.control_port);
+  if (!ok(status)) {
+    DUO_WARN("控制通道绑定 %u 失败: %s（重传与关键帧请求不可用）",
+             static_cast<unsigned>(config_.control_port), to_string(status));
+  }
 
   // 限速器的目标速率。
   //
@@ -573,6 +583,73 @@ void Sender::audio_loop() {
   }
 }
 
+void Sender::control_loop() {
+  std::vector<u8> buffer(2048);
+  const u64 window_ns = static_cast<u64>(config_.retransmit_window_ms) * 1'000'000ull;
+  u64 last_prune_ns = Clock::now_ns();
+
+  while (!stop_requested_.load(std::memory_order_acquire)) {
+    std::size_t received = 0;
+    std::string from_host;
+    u16 from_port = 0;
+
+    const Status status =
+        control_socket_.recv_from(MutByteSpan(buffer.data(), buffer.size()), received,
+                                  from_host, from_port, 100);
+    if (!ok(status)) {
+      continue;
+    }
+
+    ControlHeader header{};
+    ByteSpan payload;
+    if (!parse_control(ByteSpan(buffer.data(), received), header, payload)) {
+      continue;
+    }
+
+    if (header.type == static_cast<u8>(ControlType::Nack)) {
+      const auto* ranges = reinterpret_cast<const NackRange*>(payload.data());
+      const std::size_t count = payload.size() / sizeof(NackRange);
+
+      std::vector<Bytes> resend;
+      {
+        std::lock_guard<std::mutex> lock(retain_mutex_);
+        for (std::size_t r = 0; r < count; ++r) {
+          const NackRange& range = ranges[r];
+          for (u16 idx = range.begin; idx <= range.end; ++idx) {
+            const auto it = retained_.find({range.frame_id, idx});
+            if (it != retained_.end()) {
+              resend.push_back(it->second.wire);
+            }
+          }
+        }
+      }
+      for (const Bytes& wire : resend) {
+        socket_.send_to(ByteSpan(wire.data(), wire.size()), config_.target_host,
+                        config_.target_port);
+      }
+    } else if (header.type == static_cast<u8>(ControlType::RequestIdr)) {
+      if (encoder_) {
+        encoder_->request_keyframe();
+        DUO_INFO("接收端请求关键帧，已置标志");
+      }
+    }
+
+    // 定期清理过期的重传缓冲
+    const u64 now = Clock::now_ns();
+    if (now - last_prune_ns > 50'000'000ull) {
+      std::lock_guard<std::mutex> lock(retain_mutex_);
+      for (auto it = retained_.begin(); it != retained_.end();) {
+        if (now > it->second.sent_ns && now - it->second.sent_ns > window_ns) {
+          it = retained_.erase(it);
+        } else {
+          ++it;
+        }
+      }
+      last_prune_ns = now;
+    }
+  }
+}
+
 void Sender::send_loop() {
   std::vector<Packet> batch;
   std::vector<u8> wire;
@@ -602,6 +679,15 @@ void Sender::send_loop() {
           socket_.send_to(ByteSpan(wire.data(), wire.size()), config_.target_host,
                           config_.target_port);
       if (ok(status)) {
+        // 留一份在重传缓冲里
+        {
+          std::lock_guard<std::mutex> lock(retain_mutex_);
+          RetainedPacket retained;
+          retained.wire = wire;
+          retained.sent_ns = now;
+          retained_[{ready[i].header.frame_id, ready[i].header.pkt_index}] =
+              std::move(retained);
+        }
         std::lock_guard<std::mutex> lock(stats_mutex_);
         ++stats_.packets_sent;
         stats_.bytes_sent += wire.size();
@@ -643,6 +729,10 @@ void Sender::stop() {
   if (audio_thread_.joinable()) {
     audio_thread_.join();
   }
+  if (control_thread_.joinable()) {
+    control_thread_.join();
+  }
+  control_socket_.close();
   audio_encoder_.close();
   audio_capture_.stop();
 

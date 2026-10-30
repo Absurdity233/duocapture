@@ -5,6 +5,7 @@
 
 #include "duocapture/common/status.h"
 #include "duocapture/decode/decoder.h"
+#include "duocapture/present/telemetry_overlay.h"
 
 #if defined(_WIN32)
 #include <d3d11.h>
@@ -57,6 +58,10 @@ class Win32Presenter final : public IPresenter {
   [[nodiscard]] bool should_close() const noexcept { return should_close_; }
   [[nodiscard]] u32 width() const noexcept { return width_; }
   [[nodiscard]] u32 height() const noexcept { return height_; }
+
+  // 遥测叠加层（可选）。传入 nullptr 关闭。
+  TelemetryOverlay* overlay() noexcept;
+  void set_overlay(TelemetryOverlay* overlay) noexcept;
 
  private:
   Status create_swapchain();

@@ -162,6 +162,12 @@ int run_play(int argc, char** argv) {
       config.show_window = false;
     } else if (arg == "--analyze") {
       config.enable_analysis = true;
+    } else if (arg == "--overlay") {
+      config.show_overlay = true;
+    } else if (arg == "--peer" && has_next) {
+      config.peer_host = argv[++i];
+    } else if (arg == "--peer-control-port" && has_next) {
+      config.peer_control_port = static_cast<duo::u16>(std::atoi(argv[++i]));
     }
   }
 

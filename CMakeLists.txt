@@ -24,6 +24,7 @@ endif()
 add_library(duocore STATIC
   src/common/clock.cpp
   src/common/log.cpp
+  src/net/control_channel.cpp
   src/net/packet.cpp
   src/net/packetizer.cpp
   src/net/fec.cpp
@@ -39,6 +40,7 @@ add_library(duocore STATIC
   src/decode/sps_parser.cpp
   src/decode/nvdec_cuvid.cpp
   src/present/swapchain_presenter.cpp
+  src/present/telemetry_overlay.cpp
   src/audio/wasapi_loopback.cpp
   src/audio/aac_encoder.cpp
   src/audio/aac_decoder.cpp
@@ -112,6 +114,7 @@ if(DUO_BUILD_TESTS)
     tests/net_tests.cpp
     tests/sps_tests.cpp
     tests/pipeline_tests.cpp
+    tests/control_tests.cpp
   )
   target_link_libraries(duo_tests PRIVATE duocore)
   add_test(NAME duo_tests COMMAND duo_tests)

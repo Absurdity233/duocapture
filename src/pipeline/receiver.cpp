@@ -1,6 +1,7 @@
 #include "duocapture/pipeline/receiver.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <vector>
 
 #include "duocapture/common/clock.h"
@@ -37,6 +38,14 @@ Status Receiver::start(const ReceiverConfig& config) {
 
   jitter_ = JitterBuffer(config_.jitter_window, config_.nack_delay_ms);
 
+  // 控制通道：绑定任意端口即可（发送端不需要回连我们）
+  if (!config_.peer_host.empty()) {
+    const Status cs = control_socket_.open("0.0.0.0", 0);
+    if (!ok(cs)) {
+      DUO_WARN("控制通道打开失败: %s（NACK 与关键帧请求不可用）", to_string(cs));
+    }
+  }
+
   decoder_ = create_decoder();
   if (!decoder_) {
     DUO_ERROR("没有可用的解码后端");
@@ -56,6 +65,15 @@ Status Receiver::start(const ReceiverConfig& config) {
       DUO_ERROR("创建呈现窗口失败: %s", to_string(status));
       socket_.close();
       return status;
+    }
+
+    if (config_.show_overlay) {
+      const Status os = overlay_.initialize(presenter_->device(), presenter_->context());
+      if (ok(os)) {
+        presenter_->set_overlay(&overlay_);
+      } else {
+        DUO_WARN("遥测 overlay 初始化失败: %s", to_string(os));
+      }
     }
 
     status = decoder_->bind_device(presenter_->device(), presenter_->context());
@@ -206,8 +224,45 @@ void Receiver::receive_loop() {
     }
   }
 
-  const auto nacks = jitter_.collect_nacks(Clock::now_ns());
-  (void)nacks;  // M2 的控制通道回传在下一步接入
+  send_nacks();
+}
+
+void Receiver::send_nacks() {
+  if (!control_socket_.is_open() || config_.peer_host.empty()) {
+    return;
+  }
+
+  const u64 now = Clock::now_ns();
+  // 每 5ms 最多发一次，避免 NACK 风暴
+  if (last_nack_ns_ != 0 && now - last_nack_ns_ < 5'000'000ull) {
+    return;
+  }
+
+  const auto missing = jitter_.collect_nacks(now);
+  if (!missing.empty()) {
+    const auto ranges = compact_nacks(missing);
+    if (!ranges.empty()) {
+      const Bytes msg = serialize_control(
+          ControlType::Nack,
+          ByteSpan(reinterpret_cast<const u8*>(ranges.data()),
+                   ranges.size() * sizeof(NackRange)));
+      if (ok(control_socket_.send_to(ByteSpan(msg.data(), msg.size()), config_.peer_host,
+                                     config_.peer_control_port))) {
+        last_nack_ns_ = now;
+      }
+    }
+  }
+
+  // 长时间等不到关键帧就主动要一个（每 500ms 最多一次）
+  if (!seen_keyframe_ && (last_idr_request_ns_ == 0 ||
+                          now - last_idr_request_ns_ > 500'000'000ull)) {
+    const Bytes msg = serialize_control(ControlType::RequestIdr, {});
+    if (ok(control_socket_.send_to(ByteSpan(msg.data(), msg.size()), config_.peer_host,
+                                   config_.peer_control_port))) {
+      last_idr_request_ns_ = now;
+      DUO_INFO("请求关键帧");
+    }
+  }
 }
 
 void Receiver::handle_audio_packet(const Packet& packet) {
@@ -333,10 +388,49 @@ void Receiver::render_loop() {
     const u64 now = Clock::now_ns();
     if (now - last_stats_ns >= 1'000'000'000ull) {
       const double seconds = Clock::to_ms(now - last_stats_ns) / 1000.0;
-      std::lock_guard<std::mutex> lock(stats_mutex_);
-      stats_.receive_fps = seconds > 0.0 ? static_cast<double>(window_frames) / seconds : 0.0;
+      {
+        std::lock_guard<std::mutex> lock(stats_mutex_);
+        stats_.receive_fps = seconds > 0.0 ? static_cast<double>(window_frames) / seconds : 0.0;
+      }
       last_stats_ns = now;
       window_frames = 0;
+
+      if (config_.show_overlay) {
+        const ReceiverStats snapshot = stats();
+        char buf[64];
+        std::vector<OverlayLine> lines;
+
+        std::snprintf(buf, sizeof(buf), "%.1f fps", snapshot.receive_fps);
+        lines.push_back({"fps", buf});
+        std::snprintf(buf, sizeof(buf), "%.1f ms", snapshot.p50_end_to_end_ms);
+        lines.push_back({"latency p50", buf});
+        std::snprintf(buf, sizeof(buf), "%.1f ms", snapshot.p99_end_to_end_ms);
+        lines.push_back({"latency p99", buf});
+        std::snprintf(buf, sizeof(buf), "%llu",
+                      static_cast<unsigned long long>(snapshot.frames_presented));
+        lines.push_back({"frames", buf});
+        std::snprintf(buf, sizeof(buf), "%llu",
+                      static_cast<unsigned long long>(snapshot.frames_dropped));
+        lines.push_back({"dropped", buf});
+        std::snprintf(buf, sizeof(buf), "%llu",
+                      static_cast<unsigned long long>(snapshot.packets_recovered_by_fec));
+        lines.push_back({"fec recovered", buf});
+        std::snprintf(buf, sizeof(buf), "%llu",
+                      static_cast<unsigned long long>(snapshot.decoder_errors));
+        lines.push_back({"decode errors", buf});
+        if (config_.enable_analysis) {
+          std::snprintf(buf, sizeof(buf), "%llu (%llu)",
+                        static_cast<unsigned long long>(snapshot.frames_analyzed),
+                        static_cast<unsigned long long>(snapshot.frames_analysis_dropped));
+          lines.push_back({"analyzed", buf});
+        }
+        if (config_.play_audio) {
+          std::snprintf(buf, sizeof(buf), "%llu",
+                        static_cast<unsigned long long>(snapshot.audio_frames));
+          lines.push_back({"audio frames", buf});
+        }
+        overlay_.set_lines(lines);
+      }
     }
   }
 }
@@ -379,6 +473,7 @@ void Receiver::stop() {
   analysis_.stop();
   audio_render_.stop();
   audio_decoder_.close();
+  control_socket_.close();
 
   if (decoder_) {
     decoder_.reset();  // 必须在呈现器之前销毁：它引用了呈现器的 D3D 设备

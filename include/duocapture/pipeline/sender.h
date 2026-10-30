@@ -6,6 +6,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <map>
 #include <vector>
 
 #include "duocapture/capture/capture_source.h"
@@ -14,6 +15,7 @@
 #include "duocapture/common/status.h"
 #include "duocapture/common/types.h"
 #include "duocapture/encode/encoder.h"
+#include "duocapture/net/control_channel.h"
 #include "duocapture/net/pacer.h"
 #include "duocapture/net/packet.h"
 #include "duocapture/net/transport.h"
@@ -51,6 +53,12 @@ struct SenderConfig {
   // 走 ffmpeg 子进程 + 命名管道，-c copy 零转码。
   std::string push_url;
   std::string ffmpeg_path;
+
+  // 控制通道端口（接收端往这里发 NACK / 请求关键帧）。
+  u16 control_port = kDefaultControlPort;
+  // 重传缓冲时长：保留最近这么多毫秒的包。太短会救不回迟到包，
+  // 太长白占内存（80Mbps 下 200ms 约 2MB）。
+  u32 retransmit_window_ms = 200;
 
   // 是否采集系统声音（WASAPI 环回）并混入录制/传输。
   bool capture_audio = false;
@@ -98,6 +106,7 @@ class Sender {
  private:
   void capture_loop();
   void audio_loop();
+  void control_loop();
   void send_loop();
   Status setup_pipeline();
 
@@ -116,6 +125,16 @@ class Sender {
   WasapiLoopback audio_capture_;
   AacEncoder audio_encoder_;
   std::thread audio_thread_;
+  std::thread control_thread_;
+
+  // 重传缓冲：(frame_id, pkt_index) → 已序列化的包字节
+  struct RetainedPacket {
+    Bytes wire;
+    u64 sent_ns = 0;
+  };
+  std::mutex retain_mutex_;
+  std::map<std::pair<u32, u16>, RetainedPacket> retained_;
+  UdpSocket control_socket_;
   // 音频时间轴锚点：第一个视频帧的采集时间戳，音频按它对齐。
   std::atomic<u64> audio_anchor_ns_{0};
   // 音频包用自己的 frame_id 空间，避免和视频帧号混淆

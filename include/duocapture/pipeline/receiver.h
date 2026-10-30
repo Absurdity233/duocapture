@@ -15,6 +15,7 @@
 #include "duocapture/common/types.h"
 #include "duocapture/decode/decoder.h"
 #include "duocapture/encode/encoder.h"
+#include "duocapture/net/control_channel.h"
 #include "duocapture/net/jitter_buffer.h"
 #include "duocapture/net/transport.h"
 #include "duocapture/audio/aac_decoder.h"
@@ -45,6 +46,13 @@ struct ReceiverConfig {
 
   // 播放音频（A 端出声）。
   bool play_audio = true;
+
+  // 在画面上叠加延迟/丢包统计。
+  bool show_overlay = false;
+
+  // 发送端地址，用于回传 NACK / 请求关键帧。空表示不回传。
+  std::string peer_host;
+  u16 peer_control_port = kDefaultControlPort;
 };
 
 struct ReceiverStats {
@@ -115,6 +123,7 @@ class Receiver {
   AnalysisTap::Callback analysis_callback_ = nullptr;
   void* analysis_user_ = nullptr;
   RollingStats latency_stats_{600};
+  TelemetryOverlay overlay_;
 
   // 音频：按 frame_id 攒包，齐了就解
   AacDecoder audio_decoder_;
@@ -122,6 +131,12 @@ class Receiver {
   bool audio_started_ = false;
   std::map<u32, std::vector<Packet>> audio_pending_;
   std::mutex audio_mutex_;
+
+  // 控制通道（回传给发送端）
+  UdpSocket control_socket_;
+  u64 last_nack_ns_ = 0;
+  u64 last_idr_request_ns_ = 0;
+  void send_nacks();
 
   std::thread receive_thread_;
   std::thread render_thread_;
