@@ -4,6 +4,7 @@
 #include <utility>
 #include <vector>
 
+#include "duocapture/common/clock.h"
 #include "duocapture/common/types.h"
 #include "duocapture/net/packet.h"
 
@@ -46,7 +47,11 @@ class JitterBuffer {
  public:
   explicit JitterBuffer(std::size_t window_frames = 16, u32 nack_delay_ms = 3);
 
-  void insert(Packet packet);
+  void insert(Packet packet) { insert_at(std::move(packet), Clock::now_ns()); }
+
+  // 带显式到达时刻的版本。测试用它模拟稳定的包间隔，不必靠 sleep——
+  // CI 上 sleep 自身的抖动比被测的到达抖动还大，测试会随机失败。
+  void insert_at(Packet packet, u64 now_ns);
 
   // 取出最早的一帧完整数据。没有完整帧时返回 false。
   bool try_pop(AssembledFrame& out);

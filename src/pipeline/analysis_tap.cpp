@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <condition_variable>
+#include <mutex>
 #include <thread>
 
 #include "duocapture/common/log.h"

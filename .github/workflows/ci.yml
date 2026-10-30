@@ -20,13 +20,17 @@ jobs:
       - name: Test
         run: ctest --test-dir build -C Release --output-on-failure
 
+  # 项目本体只跑在 Windows 上（D3D11 / WASAPI / WGC），但网络层
+  # （协议、FEC、抖动缓冲、SPS、分析 tap、MKV 封装）是平台无关的。
+  # 这个 job 保证那部分不会在别人的 Linux 机器上悄悄编不过，
+  # 也顺带盯住大小端、未定义行为这类只在另一边才暴露的问题。
   linux:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
       - name: Configure
-        run: cmake -S . -B build -DDUO_BUILD_TESTS=ON
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 
       - name: Build
         run: cmake --build build -j

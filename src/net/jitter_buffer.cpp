@@ -55,9 +55,9 @@ void JitterBuffer::update_arrival_jitter(u64 now_ns) {
   }
 }
 
-void JitterBuffer::insert(Packet packet) {
+void JitterBuffer::insert_at(Packet packet, u64 now_ns) {
   ++stats_.packets_received;
-  update_arrival_jitter(Clock::now_ns());
+  update_arrival_jitter(now_ns);
 
   const u32 frame_id = packet.header.frame_id;
 
@@ -78,7 +78,7 @@ void JitterBuffer::insert(Packet packet) {
     entry.pkt_count = packet.header.pkt_count;
     entry.capture_ts_ns = packet.header.capture_ts_ns;
     entry.key = packet.is_key();
-    entry.first_seen_ns = Clock::now_ns();
+    entry.first_seen_ns = now_ns;
   }
 
   if (packet.is_parity()) {

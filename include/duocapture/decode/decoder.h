@@ -8,6 +8,11 @@
 
 #if defined(_WIN32)
 #include <d3d11.h>
+#else
+// 非 Windows 平台上这些类型没有定义，但接口签名里要用到。
+// 前向声明即可——真正带 D3D11 的实现只在 Windows 上编译。
+struct ID3D11Device;
+struct ID3D11DeviceContext;
 #endif
 
 namespace duo {

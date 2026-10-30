@@ -1,0 +1,3 @@
+[submodule "plugins/yolo_det"]
+	path = plugins/yolo_det
+	url = https://github.com/Absurdity233/duocapture-plugin-yolo-det.git
