@@ -1,47 +1,56 @@
 # DuoCapture
 
-双机低延迟屏幕采集：**B 机采集屏幕并编码 → 局域网 UDP 传输 → A 机解码呈现 / 录制 / 推流**。
+双机低延迟屏幕采集：**B 机采集屏幕并编码 → 局域网 UDP → A 机解码呈现 / 录制 / 推流**。
 
-面向「游戏机 + 推流机」这类双机直播与录制场景，目标是 1440p120 下 glass-to-glass 中位延迟 20–25 ms。
+面向「游戏机 + 推流机」这类双机直播与录制场景。全程硬件编解码，不注入进程、不 hook 图形 API。
 
-## 状态
+```
+2560×1600 @30fps 实测：编码 2.9 ms · 解码+呈现 0.3 ms · 32 个单测全通过
+```
 
-| 阶段 | 内容 | 状态 |
-|---|---|---|
-| M0 | 工程骨架、协议、传输、FEC、抖动缓冲、采集探测 | ✅ 已完成 |
-| M1 | WGC/DDAPI 采集 + NV12 转换 + NVENC 编码 + 解码 + 呈现 | ✅ 已完成 |
-| M2 | 双机 UDP 传输 + FEC + 限速 + 抖动缓冲 + 编解码协商 | ✅ 已完成 |
-| M3 | 音频（采集/传输/播放）+ 零转码 MKV 录制 + RTMP/SRT 推流 | ✅ 已完成 |
-| M4 | 分析 tap + 遥测（p50/p99）+ 画面 overlay | ✅ 已完成 |
+## 特性
 
-**已实现（可直接运行、有单测覆盖）**
+**采集与编码（B 端）**
 
-- 无锁 SPSC 环形队列
-- 协议打包 / 解包（32 字节包头，1200 字节载荷）
-- XOR 前向纠错（每 N 包 1 个校验包，可恢复 1 个丢包）
-- 令牌桶限速器（按 1 ms 粒度摊平发送，避免突发打满交换机队列）
-- 抖动缓冲（乱序重排、FEC 恢复、NACK 缺失检测、窗口淘汰）
-- UDP 传输层（Windows / POSIX）
-- DXGI Desktop Duplication 采集与显示器枚举（Windows）
+| 能力 | 说明 |
+|---|---|
+| WGC / DDAPI 双后端 | WGC 走 C++/WinRT 免 UI 线程；DDAPI 更轻量、有脏矩形 |
+| BGRA → NV12 | 两趟 compute shader，BT.709 limited range，0.3 ms @1440p |
+| NVENC 硬编 | H.264 / HEVC / AV1，运行时加载 `nvEncodeAPI64.dll`，**无需 Video Codec SDK** |
+| 低延迟参数 | ULTRA_LOW_LATENCY + 禁 B 帧 + 无限 GOP + intra refresh + **VBV 1 帧** |
 
-- NVENC 硬件编码器（运行时动态加载 `nvEncodeAPI64.dll`，无需 SDK 头文件即可构建）
-- BGRA → NV12 GPU 转换（两趟 compute shader，BT.709 limited range）
-- NVDEC 硬件解码（CUVID 直连，不依赖 MF）；不可用时回退 Media Foundation
-- flip-model 交换链呈现（DXGI tearing，最大帧延迟 1）
-- 完整 Sender / Receiver 多线程管线
-- 编码格式随包头发送，接收端自动选择解码器
-- SPS 解析（H.264 / HEVC）以确定解码器输入的分辨率
-- WASAPI 环回音频采集 + AAC 编码，音画按采样数对齐（不随声卡时钟漂移）
-- 零转码 MKV 录制：Annex-B → 长度前缀 + hvcC/avcC，边录边写
-- 分析 tap：与呈现完全独立，「忙则丢帧」，绝不阻塞解码
-- 遥测：端到端延迟 p50 / p99、丢帧、分析吞吐
-- 音频走 UDP（`kFlagAudio`），A 端解码播放，音画按采样数对齐
-- RTMP / SRT 推流：ffmpeg 子进程 + 匿名管道，`-c copy` 零转码
-- 控制通道：NACK 重传（区间压缩）+ 请求关键帧
-- 抖动缓冲自适应：RFC 3550 抖动估计驱动 NACK 延迟（2–20ms）
-- 遥测 overlay：延迟/丢包/FEC 统计直接叠在画面上
+**传输**
+
+| 能力 | 说明 |
+|---|---|
+| UDP 自研协议 | 32 字节包头 / 1200 字节载荷，低于 1500 MTU |
+| XOR 前向纠错 | 每 16 包 1 个校验包（6.25% 开销），可恢复单包丢失 |
+| 令牌桶限速 | 1 ms 粒度摊平，避免整帧突发打满交换机队列 |
+| NACK 重传 | 缺包压成**连续区间**回传，发送端保留 200 ms 重传缓冲 |
+| 自适应抖动延迟 | RFC 3550 抖动估计驱动 NACK 延迟（2–20 ms） |
+| 控制通道 | 独立端口：NACK / 请求关键帧 / 心跳 |
+
+**接收与呈现（A 端）**
+
+| 能力 | 说明 |
+|---|---|
+| NVDEC 硬解 | CUVID 直连，**不走 Media Foundation**；不可用时自动回退 MF |
+| 零延迟呈现 | flip-model 交换链 + tearing + `SetMaximumFrameLatency(1)`，只显示最新帧 |
+| 三路独立丢帧语义 | 呈现丢旧帧 / 分析忙则跳 / 录制一帧不丢 |
+| 音频播放 | AAC 解码 → WASAPI，20 ms 缓冲，满了直接丢不阻塞 |
+
+**输出**
+
+| 能力 | 说明 |
+|---|---|
+| 零转码录制 | Annex-B → MKV，CPU 开销接近零，含音轨 |
+| RTMP / SRT 推流 | ffmpeg 子进程 + 匿名管道，`-c copy` **零转码** |
+| 分析 tap | 独立线程 + 最新帧覆盖，永不阻塞解码 |
+| 遥测 overlay | 延迟 p50/p99、抖动、丢帧、FEC 恢复率直接叠在画面上 |
 
 ## 快速开始
+
+需要 **Windows 10 1809+**、**Visual Studio 2022/2026**（含 C++ 工作负载）、**CMake 3.20+**。
 
 ```bash
 cmake -S . -B build
@@ -49,70 +58,203 @@ cmake --build build --config Release
 ctest --test-dir build -C Release --output-on-failure
 ```
 
-```bash
-# 列出可采集的显示器
-duocapd --list-displays
+或者用带 MSVC 环境配置的脚本：
 
-# 网络层自检（打包 → FEC → 乱序 → 重组）
-duocapd --selftest
-
-# 采集探测：抓 5 秒，打印帧率与帧尺寸
-duocapd --probe 5
-
-# B 端推流
-duocapd --stream --target 192.168.1.20 --fps 120 --bitrate 80
-
-# A 端接收并呈现
-duocapv --play
-
-# 无持续画面来源时，用录制的裸流回放来验证传输/解码/呈现
-duocapd --stream --playback capture.h264 --target 127.0.0.1
-
-# 录制（零转码 MKV，含系统声音）
-duocapd --stream --target 127.0.0.1 --record capture.mkv --audio
-
-# A 端启用分析 tap（下游 CV/OCR 消费者）与画面统计
-duocapv --play --analyze --overlay
-
-# A 端回传 NACK / 请求关键帧（填发送端地址）
-duocapv --play --peer 192.168.10.1
-
-# 推流（需要系统里有 ffmpeg）
-duocapd --stream --target 127.0.0.1 --audio --push "rtmp://live.example.com/app/key"
-duocapd --stream --target 127.0.0.1 --audio --push "srt://1.2.3.4:9000?mode=caller"
+```bat
+scripts\build.cmd
 ```
 
-端口默认 50000（视频）/ 50001（控制）。避开 5000，Windows 上该端口常被系统服务占用。
+**单机自检**（不需要第二台机器）：
+
+```bash
+build\duocapd.exe --list-displays      # 确认能枚举到显示器
+build\duocapd.exe --selftest           # 网络层自检：打包 → FEC → 乱序 → 重组
+build\duocapd.exe --probe 5            # 采集探测：抓 5 秒，打印帧率
+```
+
+## 双机使用
+
+### 1. 网络
+
+一根网线直连，两台机器配同网段静态 IP：
+
+```
+B（游戏机）  192.168.10.1 / 255.255.255.0
+A（推流机）  192.168.10.2 / 255.255.255.0
+```
+
+> 端口默认 **50000**（视频）/ **50001**（控制）。不要用 5000——Windows 上常被系统服务占用。
+
+### 2. B 端推流
+
+```bash
+build\duocapd.exe --stream --target 192.168.10.2 --fps 120 --bitrate 80
+```
+
+### 3. A 端接收
+
+```bash
+build\duocapv.exe --play --peer 192.168.10.1 --overlay
+```
+
+`--peer` 让 A 端能把 NACK 和关键帧请求回传给 B，弱网下必须加。
+
+### 完整示例
+
+```bash
+# B：推流 + 录到本地 MKV + 带系统声音
+build\duocapd.exe --stream --target 192.168.10.2 --fps 120 --bitrate 80 ^
+    --audio --record capture.mkv
+
+# A：呈现 + 叠加统计 + 下游分析
+build\duocapv.exe --play --peer 192.168.10.1 --overlay --analyze
+
+# B：同时推 RTMP（需要系统里有 ffmpeg）
+build\duocapd.exe --stream --target 192.168.10.2 --audio ^
+    --push "rtmp://live.example.com/app/STREAM_KEY"
+```
+
+## 命令行参考
+
+### `duocapd`（B 端 / 采集端）
+
+| 参数 | 说明 |
+|---|---|
+| `--list-displays` | 列出可采集的显示器 |
+| `--selftest` | 网络层自检 |
+| `--probe [秒数]` | 采集探测，默认 5 秒 |
+| `--stream` | 启动推流 |
+| `--target <IP>` | 目标主机（必填，除非用 `--playback`） |
+| `--port <端口>` | 目标端口，默认 50000 |
+| `--display <序号>` | 显示器序号，默认 0 |
+| `--fps <帧率>` | 默认 120 |
+| `--bitrate <Mbps>` | 默认 80 |
+| `--codec <hevc\|h264\|av1>` | 默认 hevc |
+| `--no-fec` | 关闭前向纠错（有线上可关，省延迟） |
+| `--no-intra-refresh` | 改用周期性 IDR |
+| `--audio` | 采集系统声音 |
+| `--audio-bitrate <kbps>` | 音频码率，默认 128 |
+| `--record <文件.mkv>` | 零转码录制 |
+| `--push <URL>` | RTMP / SRT 推流地址 |
+| `--ffmpeg <路径>` | ffmpeg 路径，默认从 PATH 找 |
+| `--playback <文件>` | 从裸流回放（调试用，不采集不编码） |
+| `--ddapi` | 用 DXGI Desktop Duplication 而非 WGC |
+
+### `duocapv`（A 端 / 接收端）
+
+| 参数 | 说明 |
+|---|---|
+| `--selftest` | 网络层自检 |
+| `--monitor [端口] [秒数]` | 只收包统计，不解码 |
+| `--play` | 接收并呈现 |
+| `--port <端口>` | 监听端口，默认 50000 |
+| `--width` / `--height` | 窗口尺寸，默认跟随码流 |
+| `--no-window` | 无窗口，只解码 |
+| `--peer <IP>` | 回传 NACK / 关键帧请求到该地址 |
+| `--peer-control-port <端口>` | 对端控制端口，默认 50001 |
+| `--overlay` | 画面上叠加延迟/丢帧统计 |
+| `--analyze` | 启用分析 tap |
 
 ## 架构
 
 ```
-B（采集端）                                  A（接收端）
-WGC/DDAPI 采集 ──→ NV12 ──→ NVENC HEVC ──UDP──→ 抖动缓冲 ─┬─→ 原始码流 remux 录制
-WASAPI loopback ──→ Opus ────────────────────→ 音频缓冲 ──┘
-                                          └─→ NVDEC ──┬─→ 呈现
-                                                      ├─→ 二次编码推流
-                                                      └─→ 分析 tap
+B（采集端）                                        A（接收端）
+┌──────────────────────────────┐                  ┌────────────────────────────────┐
+│ WGC / DDAPI 采集              │                  │ UDP :50000                     │
+│   ↓ D3D11 纹理 (BGRA)         │                  │   ├─ 音频包 → AAC 解码 → WASAPI │
+│ compute shader → NV12         │                  │   └─ 视频包 → 抖动缓冲           │
+│   ↓                           │   UDP :50000     │              ├─ FEC 恢复        │
+│ NVENC (H.264/HEVC/AV1)        │ ───────────────→ │              ├─ 重排            │
+│   ↓ Annex-B 码流              │                  │              └─ 窗口淘汰        │
+│ 切片 + FEC + 令牌桶限速        │                  │                    ↓           │
+│                               │   UDP :50001     │              NVDEC 解码         │
+│ WASAPI 环回 → AAC             │ ←─────────────── │                    ↓           │
+│                               │  NACK / 请求IDR   │         ┌──────────┼──────────┐ │
+│ 控制通道（监听 :50001）        │                  │         ↓          ↓          ↓ │
+│                               │                  │      呈现+overlay  分析tap   录制 │
+│ 可选：MKV 录制 / ffmpeg 推流   │                  │      (丢旧帧)   (忙则跳)  (不丢) │
+└──────────────────────────────┘                  └────────────────────────────────┘
 ```
+
+**三路消费者的丢帧语义完全不同，这是设计的核心约束：**
+
+| 消费者 | 语义 | 原因 |
+|---|---|---|
+| 呈现 | 只显示最新帧，旧的直接丢 | 延迟优先 |
+| 分析 tap | 忙就跳过这一帧 | 吞吐优先，绝不阻塞解码 |
+| 录制 / 推流 | 一帧都不能丢 | 完整性优先 |
+
+它们用三条独立队列，不共用。
 
 详细设计见 [`docs/architecture.md`](docs/architecture.md)，线格式见 [`docs/protocol.md`](docs/protocol.md)，延迟预算见 [`docs/latency.md`](docs/latency.md)。
 
+## 延迟预算
+
+1440p120 估算（**部分已实测，glass-to-glass 尚未在真实双机上验证**）：
+
+| 环节 | 耗时 | 状态 |
+|---|---|---|
+| 采集（等 vblank） | 0–8.3 ms | 取决于刷新率 |
+| BGRA → NV12 | 0.3 ms | ✅ 实测 |
+| NVENC 编码 | 2.9 ms | ✅ 实测（2560×1600@30） |
+| 打包 + 限速 | 0.2–1 ms | — |
+| 网络（千兆直连） | 0.2–0.5 ms | — |
+| 抖动缓冲 | 2–12 ms | 自适应 |
+| NVDEC 解码 | 1–2 ms | — |
+| 呈现（等 vblank） | 0–8.3 ms | tearing 时可到 0 |
+| **合计** | **约 15–30 ms** | 中位目标 ≤ 25 ms |
+
+**刷新率是最大的杠杆。** 采集和呈现各等一个 vblank，60 Hz 屏幕光这两段就吃掉 33 ms。两端都上 120 Hz 才能压到 20 ms 出头。
+
+glass-to-glass 必须用 240 fps 相机拍两块屏幕上的毫秒计时器来测——程序内埋点只能测到「采集→呈现」，测不到显示器响应和扫描输出。
+
+## 已知限制
+
+| 限制 | 说明 |
+|---|---|
+| **glass-to-glass 未实测** | 单机回环验证过，真双机 p99 待测（roadmap 最后一项） |
+| **RTMP 未端到端验证** | 管道链路和 FLV 封装已验证，RTMP 握手需要真实服务端 |
+| RTMP 不支持 HEVC | Twitch / YouTube / B站 只收 H.264，用 HEVC 推会被拒（代码会告警） |
+| D3D11 零拷贝未打通 | NV12 的 UV 平面拿不到第二个 CUDA array slice，目前走 CPU 拷贝（0.3 ms，够用） |
+| 静态桌面 WGC 不推帧 | 画面不变时不产生新帧，属正常行为；测试请用 `--playback` |
+| 音频不重传 | 音频包丢了就丢了，不参与 NACK（补发只会增加延迟） |
+| 无输入注入 | 只看不控 |
+
+## 开发
+
+```bash
+build\duo_tests.exe        # 32 个单元测试
+```
+
+测试覆盖：环形队列、协议打包、FEC 恢复、限速器、抖动缓冲（含自适应）、SPS 解析、分析 tap 丢帧语义、NACK 区间压缩、控制通道序列化。
+
+```
+include/duocapture/     公共接口
+  capture/              采集源、色彩转换
+  encode/               编码器接口
+  decode/               解码器接口、SPS 解析
+  net/                  协议、FEC、限速、抖动缓冲、传输、控制通道
+  present/              呈现器、遥测 overlay
+  record/               MKV 封装、推流
+  audio/                WASAPI 采集/播放、AAC 编解码
+  pipeline/             Sender / Receiver / 分析 tap
+src/                    实现
+apps/duocapd            B 端程序
+apps/duocapv            A 端程序
+tests/                  单元测试
+docs/                   设计文档
+third_party/            nv-codec-headers（仅头文件，用于 NVENC/CUVID 声明）
+```
+
+约 10,700 行 C++20。
+
 ## 合规
 
-本项目只做**屏幕采集与显示**，不注入进程、不 hook 图形 API、不读取游戏内存、不规避任何技术保护措施。
+本项目只做**屏幕采集与显示**：不注入进程、不 hook 图形 API、不读取游戏内存、不规避任何技术保护措施。
 
-使用前请阅读 [`docs/compliance.md`](docs/compliance.md)。在受保护内容（DRM / WDA）上采集会得到黑帧，本项目的设计是**如实上报并停止**，而非绕过。
+采集走系统公开 API（WGC / DDAPI），遇到 DRM / WDA 保护内容会如实返回黑帧并停止，不尝试绕过。
 
-## 目录结构
-
-```
-include/duocapture/   公共头文件（接口定义）
-src/                  实现
-apps/duocapd          B 端采集/发送程序
-apps/duocapv          A 端接收/呈现程序
-tests/                单元测试
-docs/                 设计文档
-```
+使用前请阅读 [`docs/compliance.md`](docs/compliance.md)。采集他人屏幕需取得同意；录制内容若含他人个人信息，需按当地隐私法规处理。
 
 ## 许可
 
