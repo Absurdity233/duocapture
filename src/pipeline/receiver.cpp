@@ -28,10 +28,15 @@ Status Receiver::start(const ReceiverConfig& config) {
     return Status::InvalidArgument;
   }
 
+  // set_analysis_plugin / set_boxes_overlay_enabled 是「强制」语义，
+  // 不能被传入的 config 覆盖掉，所以先记下来再整体覆盖。
+  const bool boxes_overlay_value = config_.boxes_overlay;
   config_ = config;
-  // set_analysis_plugin 是「强制开启」语义，不能被传入的 config 覆盖掉
   if (analysis_forced_) {
     config_.enable_analysis = true;
+  }
+  if (boxes_overlay_forced_) {
+    config_.boxes_overlay = boxes_overlay_value;
   }
   stop_requested_.store(false, std::memory_order_release);
   window_closed_.store(false, std::memory_order_release);
@@ -44,6 +49,11 @@ Status Receiver::start(const ReceiverConfig& config) {
   socket_.set_recv_buffer(kRecvBufferSize);
 
   jitter_ = JitterBuffer(config_.jitter_window, config_.nack_delay_ms);
+  // 关闭自适应时把延迟钉住。JitterBuffer 用 0 表示「交给自适应」，
+  // 所以 0 在这里没有「固定为 0」的含义，配置层也按此文档化。
+  if (!config_.nack_delay_adaptive && config_.nack_delay_ms != 0) {
+    jitter_.set_nack_delay(config_.nack_delay_ms);
+  }
 
   // 控制通道：绑定任意端口即可（发送端不需要回连我们）
   if (!config_.peer_host.empty()) {
@@ -62,6 +72,8 @@ Status Receiver::start(const ReceiverConfig& config) {
 
   if (config_.show_window) {
     presenter_ = std::make_unique<Win32Presenter>();
+    // 默认 tearing（不等 vsync）换最低延迟；配置里开了 vsync 才等垂直同步。
+    presenter_->set_tearing_enabled(!config_.vsync);
 
     // 先建窗口再建解码器：解码器需要与呈现器共用同一块 D3D11 设备，
     // 这样解码输出的纹理才能直接送进视频处理器，不需要拷贝。
@@ -77,7 +89,7 @@ Status Receiver::start(const ReceiverConfig& config) {
     // 检测框叠加层独立于遥测 overlay：开关不同、绘制内容不同。
     const Status bs = box_overlay_.initialize(presenter_->device(), presenter_->context());
     if (ok(bs)) {
-      box_overlay_.set_enabled(boxes_overlay_enabled_);
+      box_overlay_.set_enabled(config_.boxes_overlay);
       presenter_->set_frame_overlay(&Receiver::draw_detection_boxes, this);
     } else {
       DUO_WARN("检测框叠加初始化失败: %s", to_string(bs));
@@ -559,7 +571,7 @@ void Receiver::set_analysis_plugin(void* adapter, AnalysisTap::Callback thunk, v
 void Receiver::draw_detection_boxes(void* user, ID3D11Texture2D* back_buffer, u32 width,
                                     u32 height) {
   auto* self = static_cast<Receiver*>(user);
-  if (self == nullptr || !self->boxes_overlay_enabled_ || self->boxes_fetch_ == nullptr) {
+  if (self == nullptr || !self->config_.boxes_overlay || self->boxes_fetch_ == nullptr) {
     return;
   }
 

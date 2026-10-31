@@ -29,6 +29,8 @@ endif()
 add_library(duonet STATIC
   src/common/clock.cpp
   src/common/log.cpp
+  src/common/json.cpp
+  src/common/config_reader.cpp
   src/net/control_channel.cpp
   src/net/packet.cpp
   src/net/packetizer.cpp
@@ -39,6 +41,7 @@ add_library(duonet STATIC
   src/decode/sps_parser.cpp
   src/record/mkv_muxer.cpp
   src/pipeline/analysis_tap.cpp
+  src/pipeline/config_file.cpp
   src/pipeline/selftest.cpp
 )
 
@@ -171,6 +174,7 @@ set(DUO_PORTABLE_TESTS
   tests/pipeline_tests.cpp
   tests/control_tests.cpp
   tests/jitter_adaptive_tests.cpp
+  tests/config_tests.cpp
 )
 
 if(DUO_BUILD_TESTS)

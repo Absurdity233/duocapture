@@ -21,40 +21,11 @@
 #include "duocapture/audio/aac_decoder.h"
 #include "duocapture/audio/wasapi_render.h"
 #include "duocapture/pipeline/analysis_tap.h"
+#include "duocapture/pipeline/receiver_config.h"
 #include "duocapture/present/box_overlay.h"
 #include "duocapture/present/presenter.h"
 
 namespace duo {
-
-struct ReceiverConfig {
-  u16 listen_port = kDefaultVideoPort;
-
-  // 0 = 跟随码流自动探测；非 0 时强制使用。
-  u32 width = 0;
-  u32 height = 0;
-
-  // 抖动缓冲窗口（帧数）。局域网 4-8 足够；有丢包/乱序时调大。
-  std::size_t jitter_window = 8;
-
-  // NACK 缺失检测延迟。
-  u32 nack_delay_ms = 3;
-
-  bool show_window = true;
-  bool vsync_off = true;  // tearing，延迟优先
-
-  // 分析 tap：把解码后的帧交给下游 CV/OCR。忙则丢帧，绝不阻塞呈现。
-  bool enable_analysis = false;
-
-  // 播放音频（A 端出声）。
-  bool play_audio = true;
-
-  // 在画面上叠加延迟/丢包统计。
-  bool show_overlay = false;
-
-  // 发送端地址，用于回传 NACK / 请求关键帧。空表示不回传。
-  std::string peer_host;
-  u16 peer_control_port = kDefaultControlPort;
-};
 
 struct ReceiverStats {
   u64 datagrams_received = 0;
@@ -116,7 +87,12 @@ class Receiver {
                            OverlayBoxFetchFn boxes_fetch = nullptr);
 
   // 检测框叠加的开关（默认开）。只在 set_analysis_plugin 后有效。
-  void set_boxes_overlay_enabled(bool enabled) noexcept { boxes_overlay_enabled_ = enabled; }
+  // 与 set_analysis_plugin 同理：这里的设置必须能活过 start() 的
+  // config_ 整体覆盖，所以额外记一个 forced 标志。
+  void set_boxes_overlay_enabled(bool enabled) noexcept {
+    config_.boxes_overlay = enabled;
+    boxes_overlay_forced_ = true;
+  }
 
   // 呈现器建好后回调，用于把 D3D 设备交给插件。
   void set_device_ready_callback(void (*fn)(void* user, void* device, void* context), void* user);
@@ -150,7 +126,6 @@ class Receiver {
                                    u32 height);
   OverlayBoxFetchFn boxes_fetch_ = nullptr;
   void* boxes_fetch_user_ = nullptr;
-  bool boxes_overlay_enabled_ = true;
 
   // 音频：按 frame_id 攒包，齐了就解
   AacDecoder audio_decoder_;
@@ -182,9 +157,11 @@ class Receiver {
   u32 height_ = 0;
   bool decoder_configured_ = false;
   bool seen_keyframe_ = false;
-  // set_analysis_plugin 设的强制标志：start() 里 config_ 会被整体覆盖，
-  // 必须单独记住，否则插件永远收不到帧。
+  // set_analysis_plugin / set_boxes_overlay_enabled 设的强制标志：
+  // start() 里 config_ 会被整体覆盖，必须单独记住，否则这两个设置会被
+  // 传进来的 config 悄悄改回去。
   bool analysis_forced_ = false;
+  bool boxes_overlay_forced_ = false;
   void (*device_ready_fn_)(void*, void*, void*) = nullptr;
   void* device_ready_user_ = nullptr;
   u32 frames_since_start_ = 0;

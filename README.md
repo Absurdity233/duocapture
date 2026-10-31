@@ -7,7 +7,7 @@
 面向「游戏机 + 推流机」这类双机直播与录制场景。全程硬件编解码，不注入进程、不 hook 图形 API。
 
 ```
-2560×1600 @30fps 实测：编码 2.9 ms · 解码+呈现 0.3 ms · 40 个单测全通过
+2560×1600 @30fps 实测：编码 2.9 ms · 解码+呈现 0.3 ms · 59 个单测全通过
 ```
 
 ## 特性
@@ -31,6 +31,7 @@
 | NACK 重传 | 缺包压成**连续区间**回传，发送端保留 200 ms 重传缓冲 |
 | 自适应 NACK 延迟 | RFC 3550 抖动估计驱动，2–20 ms 伸缩；抖得越厉害等得越久 |
 | 控制通道 | 独立端口：重传请求 / 请求关键帧 |
+| JSON 配置 | 两个程序都支持配置文件，命令行逐项覆盖；拼错的键直接报错 |
 
 **接收与呈现（A 端）**
 
@@ -137,6 +138,40 @@ build\duocapd.exe --stream --target 192.168.10.2 --audio ^
 > 录制和推流都在 **B 端**做：码流刚编码完就分叉，不经过网络，也就不会因丢包丢帧。
 > 这也是「游戏机只编码一次、推流机只管分发」这个拓扑的实际边界——A 端目前只做呈现与分析。
 
+## 配置
+
+两个程序都支持 JSON 配置文件，命令行参数逐项覆盖文件里的值：
+
+```bat
+duocapd --config sender.json --stream
+duocapv --config receiver.json --play --peer 192.168.10.1
+```
+
+```json
+{
+  "target_host": "192.168.10.2",
+  "fps": 120,
+  "bitrate_mbps": 80,
+  "fec": { "enabled": true, "group_size": 16 },
+  "audio": { "enabled": true, "bitrate_kbps": 128 }
+}
+```
+
+优先级是 **默认值 < 配置文件 < 命令行**。文件里没写的键保持默认值，
+所以配置文件不必写全。
+
+配置有错时不会带着半个配置启动，而是把所有问题一次列出来（带行号列号）：
+
+```
+读取配置 sender.json 失败:
+  sender.json:3:10: "fps" 应为整数，实际是字符串
+  sender.json:5:12: "codec" 只能是 "h264" / "hevc" / "av1"，实际是 "vp9"
+  sender.json: 未知配置项 "bitrate_mbp"
+```
+
+拼错的键是硬错误——静默忽略只会让人以为是 bug。完整键位表、取值范围和
+弱网/有线/画质三种场景的调参建议见 [`docs/config.md`](docs/config.md)。
+
 ## 命令行参考
 
 ### `duocapd`（B 端 / 采集端）
@@ -147,20 +182,27 @@ build\duocapd.exe --stream --target 192.168.10.2 --audio ^
 | `--selftest` | 网络层自检 |
 | `--probe [秒数]` | 采集探测，默认 5 秒 |
 | `--stream` | 启动推流 |
+| `--config <文件>` | 从 JSON 配置加载 |
 | `--target <IP>` | 目标主机（必填，除非用 `--playback`） |
 | `--port <端口>` | 目标端口，默认 50000 |
+| `--control-port <端口>` | 控制通道端口，默认 50001 |
 | `--display <序号>` | 显示器序号，默认 0 |
 | `--fps <帧率>` | 默认 120 |
 | `--bitrate <Mbps>` | 默认 80 |
 | `--codec <hevc\|h264\|av1>` | 默认 hevc |
 | `--no-fec` | 关闭前向纠错（有线上可关，省延迟） |
+| `--fec-group <N>` | FEC 组大小，2–64，默认 16 |
+| `--retransmit <毫秒>` | 重传缓冲时长，默认 200 |
+| `--gop <帧数>` | IDR 间隔，0 = 无限（配合 intra refresh） |
 | `--no-intra-refresh` | 改用周期性 IDR |
+| `--pacer-mbps <Mbps>` | 限速器速率，0 = 按码率自动 |
 | `--audio` | 采集系统声音 |
 | `--audio-bitrate <kbps>` | 音频码率，默认 128 |
 | `--record <文件.mkv>` | 零转码录制 |
 | `--push <URL>` | RTMP / SRT 推流地址 |
 | `--ffmpeg <路径>` | ffmpeg 路径，默认从 PATH 找 |
 | `--playback <文件>` | 从裸流回放（调试用，不采集不编码） |
+| `--playback-fps <帧率>` | 回放帧率，默认 20 |
 | `--ddapi` | 用 DXGI Desktop Duplication 而非 WGC |
 
 ### `duocapv`（A 端 / 接收端）
@@ -170,9 +212,16 @@ build\duocapd.exe --stream --target 192.168.10.2 --audio ^
 | `--selftest` | 网络层自检 |
 | `--monitor [端口] [秒数]` | 只收包统计，不解码 |
 | `--play` | 接收并呈现 |
+| `--config <文件>` | 从 JSON 配置加载 |
 | `--port <端口>` | 监听端口，默认 50000 |
 | `--width` / `--height` | 窗口尺寸，默认跟随码流 |
 | `--no-window` | 无窗口，只解码 |
+| `--vsync` | 等垂直同步（默认 tearing，延迟优先） |
+| `--jitter-window <帧>` | 抖动缓冲窗口，默认 8 |
+| `--nack-delay <毫秒>` | 初始 NACK 延迟，默认 3 |
+| `--fixed-nack-delay` | 不让抖动自适应改 NACK 延迟 |
+| `--no-audio` | 不播放音频 |
+| `--no-boxes` | 不绘制插件上报的检测框 |
 | `--peer <IP>` | 回传 NACK / 关键帧请求到该地址 |
 | `--peer-control-port <端口>` | 对端控制端口，默认 50001 |
 | `--overlay` | 画面上叠加延迟/丢帧统计 |
@@ -250,22 +299,23 @@ glass-to-glass 必须用 240 fps 相机拍两块屏幕上的毫秒计时器来�
 ## 开发
 
 ```bash
-build\duo_tests.exe        # 40 个单元测试
+build\duo_tests.exe        # 59 个单元测试（其中 54 个平台无关，Linux CI 也跑）
 ```
 
-测试覆盖：环形队列、协议打包、FEC 恢复（含尾组与乱序不误恢复）、限速器、抖动缓冲（重排 / 自适应 NACK 延迟 / 重传后恢复）、SPS 解析、分析 tap 丢帧语义、NACK 区间压缩、控制通道序列化、插件 ABI 校验。
+测试覆盖：环形队列、协议打包、FEC 恢复（含尾组与乱序不误恢复）、限速器、抖动缓冲（重排 / 自适应 NACK 延迟 / 重传后恢复）、SPS 解析、分析 tap 丢帧语义、NACK 区间压缩、控制通道序列化、插件 ABI 校验、JSON 解析（转义 / 代理对 / 拒绝尾逗号与重复键）、配置映射（未知键 / 类型错误 / 范围检查）。
 
 ```
 include/duocapture/     公共接口
   capture/              采集源、色彩转换
   encode/               编码器接口
   decode/               解码器接口、SPS 解析
+  common/               JSON、配置读取、时钟、日志、环形队列
   net/                  协议、FEC、限速、抖动缓冲、传输、控制通道
   present/              呈现器、遥测 overlay
   plugin/               插件 ABI 与宿主
   record/               MKV 封装、推流
   audio/                WASAPI 采集/播放、AAC 编解码
-  pipeline/             Sender / Receiver / 分析 tap
+  pipeline/             Sender / Receiver / 分析 tap / 配置映射
 src/                    实现
 apps/duocapd            B 端程序
 apps/duocapv            A 端程序
@@ -273,11 +323,11 @@ tests/                  单元测试
 plugins/luma_stats/     示例插件（平均亮度 + 黑帧检测）
 plugins/yolo_det/       示例插件（TensorRT YOLO 目标检测，Git submodule）
 scripts/                构建、测试、基准脚本
-docs/                   设计文档（含 plugins.md 插件开发指南）
+docs/                   设计文档（config.md 配置项、plugins.md 插件开发指南）
 third_party/            nv-codec-headers（仅头文件，用于 NVENC/CUVID 声明）
 ```
 
-约 13,000 行 C++20（含测试）。
+约 15,000 行 C++20（含测试）。
 
 ## 合规
 

@@ -180,7 +180,9 @@ Status Win32Presenter::create_swapchain() {
   desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
   desc.Scaling = DXGI_SCALING_STRETCH;
   desc.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
-  if (impl_->tearing_supported) {
+  // 交换链的 tearing 能力在创建时固定：调用方关掉 tearing 后这里就不加
+  // flags，Present 也必须用 SyncInterval=1 等 vsync。
+  if (impl_->tearing_supported && want_tearing_) {
     desc.Flags |= DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
   }
 
@@ -343,12 +345,15 @@ Status Win32Presenter::present(const DecodedFrame& frame) {
     impl_->overlay->draw(back_buffer.Get(), width_, height_);
   }
 
+  // tearing：不等 vsync，立刻翻转；否则同步到垂直回扫（画面更稳、更延迟）。
   UINT flags = 0;
-  if (impl_->tearing_supported) {
+  UINT sync_interval = 1;
+  if (impl_->tearing_supported && want_tearing_) {
     flags |= DXGI_PRESENT_ALLOW_TEARING;
+    sync_interval = 0;
   }
 
-  const HRESULT present_hr = impl_->swapchain->Present(0, flags);
+  const HRESULT present_hr = impl_->swapchain->Present(sync_interval, flags);
   if (present_hr == DXGI_ERROR_DEVICE_REMOVED || present_hr == DXGI_ERROR_DEVICE_RESET) {
     DUO_ERROR("D3D 设备丢失，重建");
     impl_->processor.Reset();

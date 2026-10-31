@@ -9,6 +9,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <string>
 #include <thread>
 #include <vector>
@@ -20,6 +21,7 @@
 #include "duocapture/net/packet.h"
 #include "duocapture/net/transport.h"
 #include "duocapture/plugin/plugin_host.h"
+#include "duocapture/pipeline/config_file.h"
 #include "duocapture/pipeline/receiver.h"
 #include "duocapture/pipeline/selftest.h"
 
@@ -36,11 +38,26 @@ void print_usage() {
       "  duocapv --play [选项]            接收并呈现\n"
       "\n"
       "播放选项:\n"
+      "  --config <文件>     从 JSON 配置加载（命令行参数覆盖文件里的值）\n"
       "  --port <端口>       监听端口，默认 %u\n"
       "  --width <像素>      窗口宽，默认跟随码流\n"
       "  --height <像素>     窗口高，默认跟随码流\n"
-      "  --no-window         无窗口，只解码不显示（性能测试用）\n",
-      kVersion, static_cast<unsigned>(duo::kDefaultVideoPort));
+      "  --no-window         无窗口，只解码不显示（性能测试用）\n"
+      "  --vsync             等垂直同步（默认 tearing，延迟优先）\n"
+      "  --jitter-window <帧> 抖动缓冲窗口，默认 8\n"
+      "  --nack-delay <毫秒> NACK 延迟，默认 3（之后由抖动自适应调整）\n"
+      "  --fixed-nack-delay  不让自适应改 NACK 延迟\n"
+      "  --no-audio          不播放音频\n"
+      "  --overlay           画面上叠加延迟 / 丢帧统计\n"
+      "  --no-boxes          不绘制插件上报的检测框\n"
+      "  --analyze           启用分析 tap（不加载插件也要能跑）\n"
+      "  --peer <IP>         回传 NACK / 关键帧请求到该地址\n"
+      "  --peer-control-port <端口> 对端控制端口，默认 %u\n"
+      "  --plugin-dir <目录> 加载该目录下的插件 DLL\n"
+      "  --plugin <名称>     指定插件（默认用第一个分析插件）\n"
+      "  --plugin-config <串> 传给插件的配置字符串\n",
+      kVersion, static_cast<unsigned>(duo::kDefaultVideoPort),
+      static_cast<unsigned>(duo::kDefaultControlPort));
 }
 
 int run_monitor(duo::u16 port, double seconds) {
@@ -155,11 +172,37 @@ int run_play(int argc, char** argv) {
   std::string plugin_name;
   std::string plugin_config;
 
+  // 先加载配置文件，再让命令行逐项覆盖——临时调参不该逼用户改文件。
+  // 从 1 开始扫：--config 允许写在模式前面。
+  int config_arg = -1;
+  for (int i = 1; i < argc; ++i) {
+    if (std::strcmp(argv[i], "--config") == 0) {
+      config_arg = (i + 1 < argc) ? i + 1 : -2;
+      break;
+    }
+  }
+  if (config_arg == -2) {
+    std::printf("--config 需要一个文件路径\n");
+    return 1;
+  }
+  if (config_arg > 0) {
+    std::string error;
+    const duo::Status status =
+        duo::apply_receiver_config_file(argv[config_arg], config, error);
+    if (!duo::ok(status)) {
+      std::printf("读取配置 %s 失败:\n%s", argv[config_arg], error.c_str());
+      return 1;
+    }
+    std::printf("已加载配置 %s\n", argv[config_arg]);
+  }
+
   for (int i = 2; i < argc; ++i) {
     const std::string arg = argv[i];
     const bool has_next = i + 1 < argc;
 
-    if (arg == "--port" && has_next) {
+    if (arg == "--config" && has_next) {
+      ++i;  // 上面已经处理过
+    } else if (arg == "--port" && has_next) {
       config.listen_port = static_cast<duo::u16>(std::atoi(argv[++i]));
     } else if (arg == "--width" && has_next) {
       config.width = static_cast<duo::u32>(std::atoi(argv[++i]));
@@ -167,6 +210,18 @@ int run_play(int argc, char** argv) {
       config.height = static_cast<duo::u32>(std::atoi(argv[++i]));
     } else if (arg == "--no-window") {
       config.show_window = false;
+    } else if (arg == "--vsync") {
+      config.vsync = true;
+    } else if (arg == "--jitter-window" && has_next) {
+      config.jitter_window = static_cast<std::size_t>(std::atoi(argv[++i]));
+    } else if (arg == "--nack-delay" && has_next) {
+      config.nack_delay_ms = static_cast<duo::u32>(std::atoi(argv[++i]));
+    } else if (arg == "--fixed-nack-delay") {
+      config.nack_delay_adaptive = false;
+    } else if (arg == "--no-audio") {
+      config.play_audio = false;
+    } else if (arg == "--no-boxes") {
+      config.boxes_overlay = false;
     } else if (arg == "--analyze") {
       config.enable_analysis = true;
     } else if (arg == "--overlay") {
@@ -181,6 +236,8 @@ int run_play(int argc, char** argv) {
       config.peer_host = argv[++i];
     } else if (arg == "--peer-control-port" && has_next) {
       config.peer_control_port = static_cast<duo::u16>(std::atoi(argv[++i]));
+    } else {
+      std::printf("警告: 未知参数 %s（用 duocapv 不带参数查看用法）\n", arg.c_str());
     }
   }
 
@@ -280,7 +337,17 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  const std::string mode = argv[1];
+  // 允许把 --config 写在模式前面（duocapv --config x.json --play ...）。
+  int mode_index = 1;
+  while (mode_index + 1 < argc && std::strcmp(argv[mode_index], "--config") == 0) {
+    mode_index += 2;
+  }
+  if (mode_index >= argc) {
+    print_usage();
+    return 1;
+  }
+
+  const std::string mode = argv[mode_index];
 
   if (mode == "--selftest") {
     const bool pass = duo::run_net_selftest(true);
@@ -288,9 +355,10 @@ int main(int argc, char** argv) {
     return pass ? 0 : 1;
   }
   if (mode == "--monitor") {
-    const duo::u16 port =
-        argc >= 3 ? static_cast<duo::u16>(std::atoi(argv[2])) : duo::kDefaultVideoPort;
-    const double seconds = argc >= 4 ? std::atof(argv[3]) : 10.0;
+    const duo::u16 port = mode_index + 1 < argc
+                              ? static_cast<duo::u16>(std::atoi(argv[mode_index + 1]))
+                              : duo::kDefaultVideoPort;
+    const double seconds = mode_index + 2 < argc ? std::atof(argv[mode_index + 2]) : 10.0;
     return run_monitor(port, seconds > 0.0 ? seconds : 10.0);
   }
   if (mode == "--play") {

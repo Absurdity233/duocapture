@@ -70,6 +70,11 @@ class Win32Presenter final : public IPresenter {
                                   u32 height);
   void set_frame_overlay(FrameOverlayFn fn, void* user) noexcept;
 
+  // 是否允许 tearing（Present 不等 vsync）。默认开，延迟优先。
+  // 关掉之后 Present 会等垂直同步，画面更稳但多等 0-8 ms。
+  // 必须在 initialize() 之前调用——交换链的 flags 在创建时就固定了。
+  void set_tearing_enabled(bool enabled) noexcept { want_tearing_ = enabled; }
+
  private:
   Status create_swapchain();
   Status ensure_video_processor(u32 input_width, u32 input_height);
@@ -80,6 +85,7 @@ class Win32Presenter final : public IPresenter {
   u32 width_ = 0;
   u32 height_ = 0;
   bool should_close_ = false;
+  bool want_tearing_ = true;
 };
 
 #endif
