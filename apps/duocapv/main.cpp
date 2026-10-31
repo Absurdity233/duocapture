@@ -24,6 +24,12 @@
 #include "duocapture/pipeline/config_file.h"
 #include "duocapture/pipeline/receiver.h"
 #include "duocapture/pipeline/selftest.h"
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
 
 namespace {
 
@@ -337,6 +343,11 @@ int run_play(int argc, char** argv) {
 }  // namespace
 
 int main(int argc, char** argv) {
+  // 日志用 UTF-8 写，Windows 控制台默认是 GBK，不切码页会全是乱码。
+#if defined(_WIN32)
+  ::SetConsoleOutputCP(CP_UTF8);
+#endif
+
   duo::set_log_level(duo::LogLevel::Info);
 
   if (argc < 2) {

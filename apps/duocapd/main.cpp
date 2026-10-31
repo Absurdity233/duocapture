@@ -19,6 +19,12 @@
 #include "duocapture/pipeline/config_file.h"
 #include "duocapture/pipeline/selftest.h"
 #include "duocapture/pipeline/sender.h"
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
 
 namespace {
 
@@ -71,6 +77,40 @@ int run_list_displays() {
   for (std::size_t i = 0; i < displays.size(); ++i) {
     std::printf("[%zu] %s\n", i, displays[i].c_str());
   }
+  return 0;
+}
+
+// 发现诊断：只用 UDP，不需要 GPU/采集，任何机器都能跑。
+// 接收端跑 `duocapd --discover` 就是「只应答不发送」的监听模式。
+int run_discover(double seconds, duo::u16 port) {
+  const auto targets = duo::local_broadcast_addresses();
+  std::printf("本机广播地址 %zu 个:", targets.size());
+  for (const auto& t : targets) {
+    std::printf(" %s", t.c_str());
+  }
+  std::printf("\n");
+
+  duo::DiscoveryResponder responder;
+  const duo::Status st = responder.start(port, duo::kDefaultVideoPort);
+  if (!duo::ok(st)) {
+    std::printf("绑定发现端口 %u 失败: %s（端口被占用？）\n",
+                static_cast<unsigned>(port), duo::to_string(st));
+    return 1;
+  }
+  std::printf("监听发现端口 %u，%.0f 秒内应答收到的探测包…\n",
+              static_cast<unsigned>(port), seconds);
+
+  const duo::u64 begin = duo::Clock::now_ns();
+  while (duo::Clock::to_ms(duo::Clock::now_ns() - begin) < seconds * 1000.0) {
+    std::string host;
+    duo::u16 ack = 0;
+    if (responder.last_sender(host, ack)) {
+      std::printf("收到探测: %s (ack_port=%u) → 已应答\n", host.c_str(),
+                  static_cast<unsigned>(ack));
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  }
+  responder.stop();
   return 0;
 }
 
@@ -285,6 +325,11 @@ int run_stream(int argc, char** argv) {
 }  // namespace
 
 int main(int argc, char** argv) {
+  // 日志用 UTF-8 写，Windows 控制台默认是 GBK，不切码页会全是乱码。
+#if defined(_WIN32)
+  ::SetConsoleOutputCP(CP_UTF8);
+#endif
+
   duo::set_log_level(duo::LogLevel::Info);
 
   if (argc < 2) {
@@ -316,6 +361,16 @@ int main(int argc, char** argv) {
   if (mode == "--probe") {
     const double seconds = mode_index + 1 < argc ? std::atof(argv[mode_index + 1]) : 5.0;
     return run_probe(seconds > 0.0 ? seconds : 5.0);
+  }
+  if (mode == "--discover") {
+    const double seconds = mode_index + 1 < argc ? std::atof(argv[mode_index + 1]) : 15.0;
+    duo::u16 port = duo::kDefaultDiscoveryPort;
+    for (int i = mode_index + 1; i + 1 < argc; ++i) {
+      if (std::strcmp(argv[i], "--discovery-port") == 0) {
+        port = static_cast<duo::u16>(std::atoi(argv[i + 1]));
+      }
+    }
+    return run_discover(seconds > 0.0 ? seconds : 15.0, port);
   }
   if (mode == "--stream") {
     return run_stream(argc, argv);

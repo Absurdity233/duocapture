@@ -293,8 +293,26 @@ bool discover_receiver(u16 discovery_port, u16 ack_port, int timeout_ms, Discove
     return true;
   }
 
-  error = "在 " + std::to_string(timeout_ms / 1000) +
-          " 秒内没有收到任何接收端应答（两端在同一网段？接收端在跑？防火墙？）";
+  // 把试过的地址列出来：最常见的原因就是接收端根本没启动，或者
+  // Windows 防火墙拦了入站 UDP（默认拦，且不提示）。
+  std::string tried;
+  for (const std::string& t : targets) {
+    if (!tried.empty()) {
+      tried += ", ";
+    }
+    tried += t;
+  }
+  error = "在 " + std::to_string(timeout_ms / 1000) + " 秒内没有收到应答。\n" +
+          "  已向这些地址广播探测（端口 " + std::to_string(discovery_port) + "）：" + tried +
+          "\n" +
+          "  请逐项确认：\n" +
+          "   1. 接收端在跑，且是新版本（旧版本不应答探测）\n" +
+          "   2. 接收端防火墙放行入站 UDP " + std::to_string(discovery_port) + "：\n" +
+          "      netsh advfirewall firewall add rule name=DuoCapture-find " +
+          "dir=in action=allow protocol=UDP localport=" + std::to_string(discovery_port) +
+          "\n" +
+          "   3. 两端在同一网段（不在同一 VLAN / 路由器隔离 / 客户端隔离）\n" +
+          "  或者直接用 --target <接收端IP> 跳过发现。";
   return false;
 }
 
