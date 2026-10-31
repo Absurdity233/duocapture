@@ -55,11 +55,30 @@ Status Receiver::start(const ReceiverConfig& config) {
     jitter_.set_nack_delay(config_.nack_delay_ms);
   }
 
-  // 控制通道：绑定任意端口即可（发送端不需要回连我们）
-  if (!config_.peer_host.empty()) {
+  // 控制通道：绑定任意端口即可（发送端不需要回连我们）。
+  // 没配 peer_host 时不急着开——等自动发现或首个视频包带来发送端地址。
+  peer_host_ = config_.peer_host;
+  peer_control_port_ = config_.peer_control_port;
+  peer_known_ = !peer_host_.empty();
+  if (peer_known_) {
     const Status cs = control_socket_.open("0.0.0.0", 0);
     if (!ok(cs)) {
       DUO_WARN("控制通道打开失败: %s（NACK 与关键帧请求不可用）", to_string(cs));
+    }
+  }
+
+  // 应答别人的自动发现探测。这让发送端不需要知道本机 IP。
+  if (config_.enable_discovery) {
+    discovery_.set_probe_callback(
+        [](void* user, const std::string& host, u16 ack_port) {
+          static_cast<Receiver*>(user)->adopt_peer(host, ack_port, true);
+        },
+        this);
+    const Status ds = discovery_.start(config_.discovery_port, config_.listen_port);
+    if (ok(ds)) {
+      DUO_INFO("自动发现已启用: 应答端口 %u", static_cast<unsigned>(config_.discovery_port));
+    } else {
+      DUO_WARN("自动发现启动失败: %s（发送端需要手填本机 IP）", to_string(ds));
     }
   }
 
@@ -134,6 +153,59 @@ Status Receiver::start(const ReceiverConfig& config) {
   return Status::Ok;
 }
 
+namespace {
+
+// 给候选地址打分，用来在多网卡机器上挑一个能回包的。
+//
+// 同机自测时探测包会从多个接口同时发出（回环、APIPA、真实网卡），
+// 接收端会收到多条来自不同源地址的探测。取最后一个会把地址换成
+// 127.0.0.1 或 169.254.x.x，NACK 就发不出去了。
+int peer_score(const std::string& host) {
+  if (host.empty()) {
+    return -1;
+  }
+  if (host.rfind("127.", 0) == 0 || host == "0.0.0.0") {
+    return 0;  // 回环：只有同机测试才有意义
+  }
+  if (host.rfind("169.254.", 0) == 0) {
+    return 1;  // 链路本地：多半是没拿到 DHCP 的接口
+  }
+  return 2;  // 正常可路由地址
+}
+
+}  // namespace
+
+void Receiver::adopt_peer(const std::string& host, u16 control_port, bool from_discovery) {
+  if (host.empty()) {
+    return;
+  }
+  std::lock_guard<std::mutex> lock(stats_mutex_);
+  // 已经通过发现配对了，就不要再被「视频包源地址」这种推断改写。
+  if (peer_known_ && peer_from_discovery_ && !from_discovery) {
+    return;
+  }
+  if (peer_known_ && peer_host_ == host && peer_control_port_ == control_port) {
+    return;
+  }
+  // 已有更好的地址时不降级；同等条件下后到的覆盖先到的（发送端重连）。
+  if (peer_known_ && peer_score(host) < peer_score(peer_host_)) {
+    return;
+  }
+  peer_host_ = host;
+  peer_control_port_ = control_port;
+  peer_known_ = true;
+  peer_from_discovery_ = peer_from_discovery_ || from_discovery;
+  if (!control_socket_.is_open()) {
+    const Status cs = control_socket_.open("0.0.0.0", 0);
+    if (!ok(cs)) {
+      DUO_WARN("控制通道打开失败: %s（NACK 与关键帧请求不可用）", to_string(cs));
+      return;
+    }
+  }
+  DUO_INFO("已配对发送端 %s（控制端口 %u）", peer_host_.c_str(),
+           static_cast<unsigned>(peer_control_port_));
+}
+
 void Receiver::receive_loop() {
   std::vector<u8> buffer(kMaxDatagram);
 
@@ -162,6 +234,17 @@ void Receiver::receive_loop() {
     ByteSpan payload;
     if (!parse(ByteSpan(buffer.data(), received), header, payload)) {
       continue;
+    }
+
+    // 兜底：发送端如果手填了我们的 IP，就不会发探测包，这里从视频包
+    // 的源地址学习。控制端口用配置里的默认值。
+    bool need_peer = false;
+    {
+      std::lock_guard<std::mutex> lock(stats_mutex_);
+      need_peer = !peer_known_;
+    }
+    if (need_peer && !from_host.empty()) {
+      adopt_peer(from_host, config_.peer_control_port, false);
     }
 
     // 编码格式随数据包头发送，首帧到达时据此选解码器。
@@ -266,7 +349,15 @@ void Receiver::receive_loop() {
 }
 
 void Receiver::send_nacks() {
-  if (!control_socket_.is_open() || config_.peer_host.empty()) {
+  // 复制一份，避免长持有 stats_mutex_（adopt_peer 会往里写）。
+  std::string peer_host;
+  u16 peer_port = 0;
+  {
+    std::lock_guard<std::mutex> lock(stats_mutex_);
+    peer_host = peer_host_;
+    peer_port = peer_control_port_;
+  }
+  if (!control_socket_.is_open() || peer_host.empty()) {
     return;
   }
 
@@ -284,8 +375,7 @@ void Receiver::send_nacks() {
           ControlType::Nack,
           ByteSpan(reinterpret_cast<const u8*>(ranges.data()),
                    ranges.size() * sizeof(NackRange)));
-      if (ok(control_socket_.send_to(ByteSpan(msg.data(), msg.size()), config_.peer_host,
-                                     config_.peer_control_port))) {
+      if (ok(control_socket_.send_to(ByteSpan(msg.data(), msg.size()), peer_host, peer_port))) {
         last_nack_ns_ = now;
       }
     }
@@ -295,8 +385,7 @@ void Receiver::send_nacks() {
   if (!seen_keyframe_ && (last_idr_request_ns_ == 0 ||
                           now - last_idr_request_ns_ > 500'000'000ull)) {
     const Bytes msg = serialize_control(ControlType::RequestIdr, {});
-    if (ok(control_socket_.send_to(ByteSpan(msg.data(), msg.size()), config_.peer_host,
-                                   config_.peer_control_port))) {
+    if (ok(control_socket_.send_to(ByteSpan(msg.data(), msg.size()), peer_host, peer_port))) {
       last_idr_request_ns_ = now;
       DUO_INFO("请求关键帧");
     }
@@ -515,6 +604,7 @@ void Receiver::stop() {
   analysis_.stop();
   audio_render_.stop();
   audio_decoder_.close();
+  discovery_.stop();
   control_socket_.close();
 
   if (decoder_) {

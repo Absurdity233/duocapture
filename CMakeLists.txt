@@ -38,6 +38,7 @@ add_library(duonet STATIC
   src/net/pacer.cpp
   src/net/jitter_buffer.cpp
   src/net/transport.cpp
+  src/net/discovery.cpp
   src/decode/sps_parser.cpp
   src/record/mkv_muxer.cpp
   src/pipeline/analysis_tap.cpp
@@ -57,7 +58,7 @@ if(WIN32)
     UNICODE
     _UNICODE
   )
-  target_link_libraries(duonet PUBLIC ws2_32 ole32)
+  target_link_libraries(duonet PUBLIC ws2_32 ole32 iphlpapi)
 else()
   find_package(Threads REQUIRED)
   target_link_libraries(duonet PUBLIC Threads::Threads)
@@ -175,6 +176,7 @@ set(DUO_PORTABLE_TESTS
   tests/control_tests.cpp
   tests/jitter_adaptive_tests.cpp
   tests/config_tests.cpp
+  tests/discovery_tests.cpp
 )
 
 if(DUO_BUILD_TESTS)

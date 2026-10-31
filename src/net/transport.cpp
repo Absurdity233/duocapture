@@ -164,6 +164,16 @@ Status UdpSocket::set_nonblocking(bool enabled) {
 #endif
 }
 
+Status UdpSocket::set_broadcast(bool enabled) {
+  if (!is_open()) {
+    return Status::NotInitialized;
+  }
+  int yes = enabled ? 1 : 0;
+  const int rc = ::setsockopt(to_native(handle_), SOL_SOCKET, SO_BROADCAST,
+                              reinterpret_cast<const char*>(&yes), sizeof(yes));
+  return rc == 0 ? Status::Ok : Status::IoError;
+}
+
 Status UdpSocket::send_to(ByteSpan data, const std::string& host, u16 port) {
   if (!is_open()) {
     return Status::NotInitialized;

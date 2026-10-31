@@ -60,7 +60,7 @@ duocapv --config receiver.json --play --peer 192.168.10.1
 
 | 键 | 类型 | 默认 | 说明 |
 |---|---|---|---|
-| `target_host` | 字符串 | `127.0.0.1` | 目标主机 |
+| `target_host` | 字符串 | `auto` | 目标主机。`auto` = 局域网自动发现 |
 | `target_port` | 整数 1–65535 | 50000 | 目标端口 |
 | `control_port` | 整数 1–65535 | 50001 | 控制通道端口（收 NACK） |
 | `display_index` | 整数 0–15 | 0 | 显示器序号 |
@@ -96,6 +96,36 @@ duocapv --config receiver.json --play --peer 192.168.10.1
 }
 ```
 
+### 自动发现（不用填 IP）
+
+同网段的两台机器不需要手填对方的地址：
+
+- **发送端**（`target_host` 留空或写 `auto`）广播探测包，用第一个应答的
+  接收端地址
+- **接收端**默认应答探测，并同时学会发送端地址（用于回发 NACK）
+
+协议是一个 UDP 往返（发现端口默认 50002）：
+
+```
+发送端 → 广播  DUOD | ver | nonce | ack_port      （ack_port = 本机控制端口）
+接收端 → 单播  DUOA | ver | nonce | video_port    （video_port = 本机视频端口）
+```
+
+`ack_port` 跟着探测包走，所以接收端一次交互就同时知道「往哪发视频」
+和「往哪发 NACK」，两端都不需要配置任何地址。
+
+| 键 | 端 | 默认 | 说明 |
+|---|---|---|---|
+| `target_host` | 发送 | `auto` | `auto`/空 = 自动发现，写 IP = 直连 |
+| `discovery_port` | 两端 | `50002` | 发现端口，必须一致 |
+| `discovery_timeout_ms` | 发送 | `5000` | 等应答的超时 |
+| `discovery` | 接收 | `true` | `false` = 不应答探测 |
+
+关闭方式：发送端写死 `--target <IP>`，接收端加 `--no-discovery`。
+
+注意发现只是「找到人」，不是信任判断——同网段任何主机都能应答，
+数据流仍然是点对点的。
+
 ## 接收端（duocapv）
 
 | 键 | 类型 | 默认 | 说明 |
@@ -111,7 +141,7 @@ duocapv --config receiver.json --play --peer 192.168.10.1
 | `play_audio` | 布尔 | `true` | A 端出声 |
 | `overlay` | 布尔 | `false` | 叠加延迟/丢帧统计 |
 | `boxes_overlay` | 布尔 | `true` | 绘制插件上报的检测框 |
-| `peer_host` | 字符串 | 空 | 回传 NACK / 请求关键帧的目标，空 = 不回传 |
+| `peer_host` | 字符串 | 空 | 回传 NACK 的目标，空 = 从发送端自动学习 |
 | `peer_control_port` | 整数 1–65535 | 50001 | 对端控制端口 |
 
 示例：

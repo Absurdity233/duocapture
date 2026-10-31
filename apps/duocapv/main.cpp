@@ -51,12 +51,15 @@ void print_usage() {
       "  --overlay           画面上叠加延迟 / 丢帧统计\n"
       "  --no-boxes          不绘制插件上报的检测框\n"
       "  --analyze           启用分析 tap（不加载插件也要能跑）\n"
-      "  --peer <IP>         回传 NACK / 关键帧请求到该地址\n"
+      "  --peer <IP>         回传 NACK 的地址。默认从发送端自动学习\n"
+      "  --no-discovery      不应答发送端的局域网自动发现\n"
+      "  --discovery-port <端口> 自动发现端口，默认 %u\n"
       "  --peer-control-port <端口> 对端控制端口，默认 %u\n"
       "  --plugin-dir <目录> 加载该目录下的插件 DLL\n"
       "  --plugin <名称>     指定插件（默认用第一个分析插件）\n"
       "  --plugin-config <串> 传给插件的配置字符串\n",
       kVersion, static_cast<unsigned>(duo::kDefaultVideoPort),
+      static_cast<unsigned>(duo::kDefaultDiscoveryPort),
       static_cast<unsigned>(duo::kDefaultControlPort));
 }
 
@@ -234,6 +237,10 @@ int run_play(int argc, char** argv) {
       plugin_config = argv[++i];
     } else if (arg == "--peer" && has_next) {
       config.peer_host = argv[++i];
+    } else if (arg == "--no-discovery") {
+      config.enable_discovery = false;
+    } else if (arg == "--discovery-port" && has_next) {
+      config.discovery_port = static_cast<duo::u16>(std::atoi(argv[++i]));
     } else if (arg == "--peer-control-port" && has_next) {
       config.peer_control_port = static_cast<duo::u16>(std::atoi(argv[++i]));
     } else {

@@ -4,7 +4,7 @@
 //   duocapd --list-displays
 //   duocapd --selftest
 //   duocapd --probe [秒数]
-//   duocapd --stream --target <主机> [选项]
+//   duocapd --stream [--target <IP>|auto] [选项]
 
 #include <chrono>
 #include <cstdio>
@@ -31,11 +31,12 @@ void print_usage() {
       "  duocapd --list-displays                列出可采集的显示器\n"
       "  duocapd --selftest                     运行网络层自检\n"
       "  duocapd --probe [秒数]                 采集探测，默认 5 秒\n"
-      "  duocapd --stream --target <主机> [选项] 推流\n"
+      "  duocapd --stream [--target <IP>|auto] [选项] 推流\n"
       "\n"
       "推流选项:\n"
       "  --config <文件>        从 JSON 配置加载（命令行参数覆盖文件里的值）\n"
-      "  --target <IP>          目标主机（必填，除非用 --playback）\n"
+      "  --target <IP>          目标主机。默认 auto = 局域网自动发现\n"
+      "  --discovery-port <端口> 自动发现端口，默认 %u\n"
       "  --port <端口>          目标端口，默认 %u\n"
       "  --control-port <端口>  控制通道端口，默认 %u\n"
       "  --display <序号>       显示器序号，默认 0\n"
@@ -57,6 +58,7 @@ void print_usage() {
       "  --playback-fps <帧率>  回放帧率，默认 20\n"
       "  --ddapi                使用 DXGI Desktop Duplication 而非 WGC\n",
       kVersion, static_cast<unsigned>(duo::kDefaultVideoPort),
+      static_cast<unsigned>(duo::kDefaultDiscoveryPort),
       static_cast<unsigned>(duo::kDefaultControlPort));
 }
 
@@ -150,7 +152,7 @@ int find_config_arg(int argc, char** argv) {
 
 int run_stream(int argc, char** argv) {
   duo::SenderConfig config;
-  config.target_host.clear();
+  // 保留 "auto" 默认值：同网段下不需要填 IP，发送端会广播找接收端。
 
   // 先加载配置文件，再让命令行逐项覆盖：命令行是更具体的意图，
   // 临时调参不该逼用户去改文件。
@@ -178,6 +180,8 @@ int run_stream(int argc, char** argv) {
       ++i;  // 上面已经处理过
     } else if (arg == "--target" && has_next) {
       config.target_host = argv[++i];
+    } else if (arg == "--discovery-port" && has_next) {
+      config.discovery_port = static_cast<duo::u16>(std::atoi(argv[++i]));
     } else if (arg == "--port" && has_next) {
       config.target_port = static_cast<duo::u16>(std::atoi(argv[++i]));
     } else if (arg == "--control-port" && has_next) {
@@ -238,9 +242,9 @@ int run_stream(int argc, char** argv) {
     }
   }
 
-  if (config.target_host.empty() && config.playback_path.empty()) {
-    std::printf("缺少 --target <主机>（或 --playback <文件>）\n");
-    return 1;
+  // target_host 默认就是 auto：同网段下不用填任何 IP。
+  if (config.target_host.empty()) {
+    config.target_host = "auto";
   }
 
   duo::Sender sender;

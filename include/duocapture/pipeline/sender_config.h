@@ -4,6 +4,7 @@
 #include <string>
 
 #include "duocapture/common/types.h"
+#include "duocapture/net/discovery.h"
 #include "duocapture/encode/encoder.h"
 
 namespace duo {
@@ -20,8 +21,14 @@ struct SenderConfig {
   u32 bitrate_bps = 80'000'000;
   Codec codec = Codec::Hevc;
 
-  std::string target_host = "127.0.0.1";
+  // 目标主机。空字符串或 "auto" 表示局域网自动发现——广播探测，
+  // 用第一个应答的接收端的地址。显式写 IP 则跳过发现。
+  std::string target_host = "auto";
   u16 target_port = kDefaultVideoPort;
+
+  // 自动发现用的端口与超时。超时太短在Wi-Fi上容易漏，太长则启动明显变慢。
+  u16 discovery_port = kDefaultDiscoveryPort;
+  u32 discovery_timeout_ms = 5000;
 
   std::size_t fec_group_size = 16;
   bool enable_fec = true;

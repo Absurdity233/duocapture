@@ -22,6 +22,7 @@
 #include "duocapture/audio/wasapi_render.h"
 #include "duocapture/pipeline/analysis_tap.h"
 #include "duocapture/pipeline/receiver_config.h"
+#include "duocapture/net/discovery.h"
 #include "duocapture/present/box_overlay.h"
 #include "duocapture/present/presenter.h"
 
@@ -134,8 +135,20 @@ class Receiver {
   std::map<u32, std::vector<Packet>> audio_pending_;
   std::mutex audio_mutex_;
 
-  // 控制通道（回传给发送端）
+  // 控制通道（回传给发送端）。发送端地址可能来自配置，也可能来自
+  // 自动发现 / 首个视频包，所以这里单独存一份，而不是直接用 config_。
   UdpSocket control_socket_;
+  std::string peer_host_;
+  u16 peer_control_port_ = kDefaultControlPort;
+  bool peer_known_ = false;
+  // 地址来自发现应答（带控制端口）还是从视频包源地址猜的。前者更可信，
+  // 不允许被后者覆盖——同机回环时视频包的源地址会是 127.0.0.1，
+  // 覆盖掉真实地址会让 NACK 发错地方。
+  bool peer_from_discovery_ = false;
+  void adopt_peer(const std::string& host, u16 control_port, bool from_discovery);
+
+  // 应答发送端的广播探测，让对端不用手填 IP。
+  DiscoveryResponder discovery_;
   u64 last_nack_ns_ = 0;
   u64 last_idr_request_ns_ = 0;
   void send_nacks();

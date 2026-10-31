@@ -33,6 +33,25 @@ Status Sender::start(const SenderConfig& config) {
   config_ = config;
   stop_requested_.store(false, std::memory_order_release);
 
+  // 自动发现：在采集/编码之前先把目标定下来，免得配错 IP 时白跑一遍
+  // NVENC 初始化。
+  if (config_.target_host.empty() || config_.target_host == "auto") {
+    DiscoveryReply reply;
+    std::string error;
+    DUO_INFO("正在局域网内搜索接收端（发现端口 %u）…",
+             static_cast<unsigned>(config_.discovery_port));
+    if (!discover_receiver(config_.discovery_port, config_.control_port,
+                           static_cast<int>(config_.discovery_timeout_ms), reply, error)) {
+      DUO_ERROR("自动发现失败: %s", error.c_str());
+      return Status::NotSupported;
+    }
+    config_.target_host = reply.host;
+    config_.target_port = reply.video_port;
+    DUO_INFO("已发现接收端 %s:%u（本机控制端口 %u 已告知对方）", config_.target_host.c_str(),
+             static_cast<unsigned>(config_.target_port),
+             static_cast<unsigned>(config_.control_port));
+  }
+
   Status status = setup_pipeline();
   if (!ok(status)) {
     return status;

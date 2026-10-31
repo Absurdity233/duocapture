@@ -29,6 +29,10 @@ class UdpSocket {
   Status set_send_buffer(std::size_t bytes);
   Status set_nonblocking(bool enabled);
 
+  // 允许往 255.255.255.255 / 网段广播地址发包。发现协议需要它；
+  // 默认关闭，免得普通收发误发广播。
+  Status set_broadcast(bool enabled);
+
   Status send_to(ByteSpan data, const std::string& host, u16 port);
 
   // timeout_ms < 0 表示阻塞等待。

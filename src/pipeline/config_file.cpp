@@ -60,8 +60,11 @@ Status apply_sender_config_file(const std::string& path, SenderConfig& config,
 
   ConfigReader reader(root, path);
 
+  // target_host 写 "auto"（或留空）表示局域网自动发现。
   reader.string("target_host", config.target_host);
   reader.integer("target_port", config.target_port, 1, 65535);
+  reader.integer("discovery_port", config.discovery_port, 1, 65535);
+  reader.integer("discovery_timeout_ms", config.discovery_timeout_ms, 200, 60000);
   reader.integer("display_index", config.display_index, 0, 15);
   reader.boolean("prefer_wgc", config.prefer_wgc);
 
@@ -124,6 +127,8 @@ Status apply_receiver_config_file(const std::string& path, ReceiverConfig& confi
 
   reader.string("peer_host", config.peer_host);
   reader.integer("peer_control_port", config.peer_control_port, 1, 65535);
+  reader.boolean("discovery", config.enable_discovery);
+  reader.integer("discovery_port", config.discovery_port, 1, 65535);
 
   reader.report_unknown_keys();
   return finish(reader, error);

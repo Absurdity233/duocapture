@@ -4,6 +4,7 @@
 #include <string>
 
 #include "duocapture/common/types.h"
+#include "duocapture/net/discovery.h"
 
 namespace duo {
 
@@ -46,8 +47,14 @@ struct ReceiverConfig {
   bool boxes_overlay = true;
 
   // 发送端地址，用于回传 NACK / 请求关键帧。空表示不回传。
+  // 回传给发送端用的地址。留空 = 从收到的第一个视频包自动学习
+  // 发送端 IP（局域网里这是最省事的默认）。
   std::string peer_host;
   u16 peer_control_port = kDefaultControlPort;
+
+  // 应答发送端的广播发现，让别人不用手填 IP 就能找到本机。
+  bool enable_discovery = true;
+  u16 discovery_port = kDefaultDiscoveryPort;
 };
 
 }  // namespace duo
