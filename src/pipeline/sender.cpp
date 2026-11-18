@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cstdio>
 #include <fstream>
+#include <set>
 
 #include "duocapture/common/clock.h"
 #include "duocapture/common/log.h"
@@ -31,25 +32,46 @@ Status Sender::start(const SenderConfig& config) {
   }
 
   config_ = config;
+  destinations_.clear();
   stop_requested_.store(false, std::memory_order_release);
+
+  if (!config_.relay_host.empty()) {
+    destinations_.emplace_back(config_.relay_host, config_.relay_port);
+  } else if (!config_.target_hosts.empty()) {
+    for (const auto& host : config_.target_hosts) {
+      const auto destination = std::make_pair(host, config_.target_port);
+      if (std::find(destinations_.begin(), destinations_.end(), destination) == destinations_.end()) {
+        destinations_.push_back(destination);
+      }
+    }
+    config_.target_host = destinations_.front().first;
+  }
 
   // 自动发现：在采集/编码之前先把目标定下来，免得配错 IP 时白跑一遍
   // NVENC 初始化。
-  if (config_.target_host.empty() || config_.target_host == "auto") {
-    DiscoveryReply reply;
+  if (destinations_.empty() && (config_.target_host.empty() || config_.target_host == "auto")) {
+    std::vector<DiscoveryReply> replies;
     std::string error;
     DUO_INFO("正在局域网内搜索接收端（发现端口 %u）…",
              static_cast<unsigned>(config_.discovery_port));
-    if (!discover_receiver(config_.discovery_port, config_.control_port,
-                           static_cast<int>(config_.discovery_timeout_ms), reply, error)) {
+    if (!discover_receivers(config_.discovery_port, config_.control_port,
+                            static_cast<int>(config_.discovery_timeout_ms), replies, error)) {
       DUO_ERROR("自动发现失败: %s", error.c_str());
       return Status::NotSupported;
     }
-    config_.target_host = reply.host;
-    config_.target_port = reply.video_port;
-    DUO_INFO("已发现接收端 %s:%u（本机控制端口 %u 已告知对方）", config_.target_host.c_str(),
-             static_cast<unsigned>(config_.target_port),
-             static_cast<unsigned>(config_.control_port));
+    for (const auto& reply : replies) destinations_.emplace_back(reply.host, reply.video_port);
+    config_.target_host = destinations_.front().first;
+    config_.target_port = destinations_.front().second;
+    DUO_INFO("发现 %zu 个接收端", destinations_.size());
+  }
+  if (destinations_.empty()) {
+    destinations_.emplace_back(config_.target_host, config_.target_port);
+  }
+  {
+    std::set<std::pair<std::string, u16>> unique(destinations_.begin(), destinations_.end());
+    if (unique.size() != destinations_.size() || destinations_.size() > 64) {
+      return Status::InvalidArgument;
+    }
   }
 
   Status status = setup_pipeline();
@@ -666,9 +688,13 @@ void Sender::control_loop() {
           }
         }
       }
-      for (const Bytes& wire : resend) {
-        socket_.send_to(ByteSpan(wire.data(), wire.size()), config_.target_host,
-                        config_.target_port);
+      auto destination = std::find_if(destinations_.begin(), destinations_.end(),
+                                      [&](const auto& item) { return item.first == from_host; });
+      if (destination != destinations_.end()) {
+        for (const Bytes& wire : resend) {
+          (void)socket_.send_to(ByteSpan(wire.data(), wire.size()), destination->first,
+                                destination->second);
+        }
       }
     } else if (header.type == static_cast<u8>(ControlType::RequestIdr)) {
       if (encoder_) {
@@ -718,10 +744,13 @@ void Sender::send_loop() {
     const std::size_t count = pacer_.poll(now, ready, kMaxPacketsPerPoll);
     for (std::size_t i = 0; i < count; ++i) {
       wire = serialize(ready[i].header, ready[i].payload);
-      const Status status =
-          socket_.send_to(ByteSpan(wire.data(), wire.size()), config_.target_host,
-                          config_.target_port);
-      if (ok(status)) {
+      bool sent = false;
+      for (const auto& destination : destinations_) {
+        const Status status = socket_.send_to(ByteSpan(wire.data(), wire.size()),
+                                              destination.first, destination.second);
+        sent = sent || ok(status);
+      }
+      if (sent) {
         // 留一份在重传缓冲里
         {
           std::lock_guard<std::mutex> lock(retain_mutex_);

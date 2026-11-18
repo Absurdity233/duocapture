@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <string>
+#include <vector>
 
 #include "duocapture/common/types.h"
 #include "duocapture/net/discovery.h"
@@ -25,6 +26,11 @@ struct SenderConfig {
   // 用第一个应答的接收端的地址。显式写 IP 则跳过发现。
   std::string target_host = "auto";
   u16 target_port = kDefaultVideoPort;
+  // Explicit fan-out destinations (IPv4 literals). Empty preserves target_host behavior.
+  std::vector<std::string> target_hosts;
+  // Optional UDP relay endpoint. When set, video packets go only to the relay.
+  std::string relay_host;
+  u16 relay_port = kDefaultVideoPort;
 
   // 自动发现用的端口与超时。超时太短在Wi-Fi上容易漏，太长则启动明显变慢。
   u16 discovery_port = kDefaultDiscoveryPort;

@@ -39,6 +39,7 @@ add_library(duonet STATIC
   src/net/jitter_buffer.cpp
   src/net/transport.cpp
   src/net/discovery.cpp
+  src/net/relay.cpp
   src/decode/sps_parser.cpp
   src/record/mkv_muxer.cpp
   src/pipeline/analysis_tap.cpp
@@ -135,7 +136,11 @@ if(WIN32)
 endif()
 
 # ---------------------------------------------------------------- applications
-# 两个程序都依赖 D3D11 / WASAPI / Win32，只在 Windows 上构建。
+# 中转服务只依赖可移植网络层，所有平台都可运行。
+add_executable(duorelay apps/duorelay/main.cpp)
+target_link_libraries(duorelay PRIVATE duonet)
+
+# 两个采集/接收程序依赖 D3D11 / WASAPI / Win32，只在 Windows 上构建。
 if(WIN32)
   add_executable(duocapd apps/duocapd/main.cpp)
   target_link_libraries(duocapd PRIVATE duocore)
@@ -177,6 +182,7 @@ set(DUO_PORTABLE_TESTS
   tests/jitter_adaptive_tests.cpp
   tests/config_tests.cpp
   tests/discovery_tests.cpp
+  tests/relay_tests.cpp
 )
 
 if(DUO_BUILD_TESTS)

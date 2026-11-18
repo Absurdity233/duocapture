@@ -104,6 +104,10 @@ std::vector<std::string> local_broadcast_addresses();
 
 // ack_port 是本机接收 NACK 的端口，会随探测包一起广播出去，
 // 接收端据此就知道该把 NACK 发到哪。
+bool discover_receivers(u16 discovery_port, u16 ack_port, int timeout_ms,
+                        std::vector<DiscoveryReply>& out, std::string& error);
+
+// Backward-compatible first-reply helper.
 bool discover_receiver(u16 discovery_port, u16 ack_port, int timeout_ms, DiscoveryReply& out,
                        std::string& error);
 

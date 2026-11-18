@@ -124,7 +124,7 @@ class Receiver {
 
   // 检测框来源：适配器的紧凑回调 + 它的 this。呈现线程通过它取最新框。
   static void draw_detection_boxes(void* user, ID3D11Texture2D* back_buffer, u32 width,
-                                   u32 height);
+                                   u32 height, u32 source_width, u32 source_height);
   OverlayBoxFetchFn boxes_fetch_ = nullptr;
   void* boxes_fetch_user_ = nullptr;
 

@@ -26,6 +26,7 @@ class ConfigReader {
 
   void boolean(std::string_view path, bool& out);
   void string(std::string_view path, std::string& out);
+  void string_array(std::string_view path, std::vector<std::string>& out);
 
   // 整数，含范围检查。u64 版本同时覆盖 size_t（两者在所有主流平台同宽）。
   void integer(std::string_view path, u16& out, u64 min, u64 max);

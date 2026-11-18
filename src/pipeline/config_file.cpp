@@ -1,6 +1,7 @@
 #include "duocapture/pipeline/config_file.h"
 
 #include <string_view>
+#include <cctype>
 
 #include "duocapture/common/config_reader.h"
 #include "duocapture/common/json.h"
@@ -31,6 +32,21 @@ Status finish(const ConfigReader& reader, std::string& error) {
 }
 
 // 枚举类配置项：先按字符串读，再映射。写错时给出可选值，避免用户翻文档。
+void split_hosts(const std::string& text, std::vector<std::string>& out) {
+  std::size_t begin = 0;
+  while (begin < text.size()) {
+    const std::size_t end = text.find(',', begin);
+    std::string item = text.substr(begin, end == std::string::npos ? end : end - begin);
+    std::size_t first = 0;
+    while (first < item.size() && std::isspace(static_cast<unsigned char>(item[first]))) ++first;
+    std::size_t last = item.size();
+    while (last > first && std::isspace(static_cast<unsigned char>(item[last - 1]))) --last;
+    if (last > first) out.push_back(item.substr(first, last - first));
+    if (end == std::string::npos) break;
+    begin = end + 1;
+  }
+}
+
 void read_codec(ConfigReader& reader, std::string_view path, Codec& out) {
   std::string text;
   reader.string(path, text);
@@ -62,7 +78,20 @@ Status apply_sender_config_file(const std::string& path, SenderConfig& config,
 
   // target_host 写 "auto"（或留空）表示局域网自动发现。
   reader.string("target_host", config.target_host);
+  if (const JsonValue* targets = root.find("target_hosts")) {
+    if (targets->is_string()) {
+      std::string text;
+      reader.string("target_hosts", text);
+      split_hosts(text, config.target_hosts);
+    } else if (targets->is_array()) {
+      reader.string_array("target_hosts", config.target_hosts);
+    } else {
+      reader.fail("target_hosts", "应为逗号分隔字符串或字符串数组");
+    }
+  }
   reader.integer("target_port", config.target_port, 1, 65535);
+  reader.string("relay_host", config.relay_host);
+  reader.integer("relay_port", config.relay_port, 1, 65535);
   reader.integer("discovery_port", config.discovery_port, 1, 65535);
   reader.integer("discovery_timeout_ms", config.discovery_timeout_ms, 200, 60000);
   reader.integer("display_index", config.display_index, 0, 15);

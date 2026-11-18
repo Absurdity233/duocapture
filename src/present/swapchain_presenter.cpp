@@ -339,7 +339,8 @@ Status Win32Presenter::present(const DecodedFrame& frame) {
   // 叠加层画在后备缓冲上，这样它不会被视频处理器覆盖。
   // 先画检测框（它是全画布半透明），再画遥测文字（左上角小块）。
   if (impl_->frame_overlay != nullptr) {
-    impl_->frame_overlay(impl_->frame_overlay_user, back_buffer.Get(), width_, height_);
+    impl_->frame_overlay(impl_->frame_overlay_user, back_buffer.Get(), width_, height_,
+                         desc.Width, desc.Height);
   }
   if (impl_->overlay != nullptr) {
     impl_->overlay->draw(back_buffer.Get(), width_, height_);

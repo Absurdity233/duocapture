@@ -68,6 +68,7 @@ class Sender {
   Status setup_pipeline();
 
   SenderConfig config_;
+  std::vector<std::pair<std::string, u16>> destinations_;
   std::atomic<bool> running_{false};
   std::atomic<bool> stop_requested_{false};
 

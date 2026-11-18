@@ -66,8 +66,12 @@ class Win32Presenter final : public IPresenter {
 
   // 检测框叠加层回调（可选）。present() 在 Blt 之后、Present 之前调用它，
   // 传进来的后备缓冲可以直接往上画。
+  //
+  // source_width/source_height 是**解码帧**的尺寸——叠加内容的坐标是相对它的，
+  // 而 back_buffer 是窗口尺寸，两者长宽比通常不同（视频处理器会拉伸）。
+  // 调用方必须用它们做换算，不能用窗口尺寸代替。
   using FrameOverlayFn = void (*)(void* user, ID3D11Texture2D* back_buffer, u32 width,
-                                  u32 height);
+                                  u32 height, u32 source_width, u32 source_height);
   void set_frame_overlay(FrameOverlayFn fn, void* user) noexcept;
 
   // 是否允许 tearing（Present 不等 vsync）。默认开，延迟优先。

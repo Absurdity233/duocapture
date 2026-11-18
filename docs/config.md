@@ -61,7 +61,10 @@ duocapv --config receiver.json --play --peer 192.168.10.1
 | 键 | 类型 | 默认 | 说明 |
 |---|---|---|---|
 | `target_host` | 字符串 | `auto` | 目标主机。`auto` = 局域网自动发现 |
-| `target_port` | 整数 1–65535 | 50000 | 目标端口 |
+| `target_port` | 整数 1–65535 | 50000 | 目标端口；多目标时为所有目标端口 |
+| `target_hosts` | 字符串或字符串数组 | 空 | 多个接收端，例如 `"192.168.10.2,192.168.10.3"` 或 `["192.168.10.2", "192.168.10.3"]`；设置后跳过自动发现 |
+| `relay_host` | 字符串 | 空 | UDP 中转服务器地址；设置后视频只发给中转服务器 |
+| `relay_port` | 整数 1–65535 | 50000 | 中转服务器视频端口 |
 | `control_port` | 整数 1–65535 | 50001 | 控制通道端口（收 NACK） |
 | `display_index` | 整数 0–15 | 0 | 显示器序号 |
 | `prefer_wgc` | 布尔 | `true` | `false` = 用 DDAPI |
@@ -86,7 +89,8 @@ duocapv --config receiver.json --play --peer 192.168.10.1
 
 ```json
 {
-  "target_host": "192.168.10.2",
+  "target_hosts": ["192.168.10.2", "192.168.10.3"],
+  "target_port": 50000,
   "fps": 120,
   "bitrate_mbps": 80,
   "codec": "hevc",
@@ -104,7 +108,7 @@ duocapv --config receiver.json --play --peer 192.168.10.1
   接收端地址
 - **接收端**默认应答探测，并同时学会发送端地址（用于回发 NACK）
 
-协议是一个 UDP 往返（发现端口默认 50002）：
+协议是一个 UDP 往返（发现端口默认 50002）。发送端在整个 timeout 窗口内收集有效应答，并按接收端 IP 与视频端口去重，可将一帧发送给发现到的全部接收端。
 
 ```
 发送端 → 广播  DUOD | ver | nonce | ack_port      （ack_port = 本机控制端口）

@@ -42,6 +42,8 @@ void print_usage() {
       "推流选项:\n"
       "  --config <文件>        从 JSON 配置加载（命令行参数覆盖文件里的值）\n"
       "  --target <IP>          目标主机。默认 auto = 局域网自动发现\n"
+      "  --target-add <IP>      添加一个并行接收端（可重复）\n"
+      "  --relay <IP>           经 UDP 中转服务器发送\n"
       "  --discovery-port <端口> 自动发现端口，默认 %u\n"
       "  --port <端口>          目标端口，默认 %u\n"
       "  --control-port <端口>  控制通道端口，默认 %u\n"
@@ -220,6 +222,15 @@ int run_stream(int argc, char** argv) {
       ++i;  // 上面已经处理过
     } else if (arg == "--target" && has_next) {
       config.target_host = argv[++i];
+      config.target_hosts.clear();
+    } else if (arg == "--target-add" && has_next) {
+      config.target_hosts.emplace_back(argv[++i]);
+      config.target_host = config.target_hosts.front();
+    } else if (arg == "--relay" && has_next) {
+      config.relay_host = argv[++i];
+      config.target_hosts.clear();
+    } else if (arg == "--relay-port" && has_next) {
+      config.relay_port = static_cast<duo::u16>(std::atoi(argv[++i]));
     } else if (arg == "--discovery-port" && has_next) {
       config.discovery_port = static_cast<duo::u16>(std::atoi(argv[++i]));
     } else if (arg == "--port" && has_next) {

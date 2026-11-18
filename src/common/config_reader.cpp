@@ -110,6 +110,27 @@ void ConfigReader::string(std::string_view path, std::string& out) {
   out = value->text;
 }
 
+void ConfigReader::string_array(std::string_view path, std::vector<std::string>& out) {
+  const JsonValue* value = lookup(path);
+  if (value == nullptr) {
+    return;
+  }
+  if (!value->is_array()) {
+    report_error(*value, path, std::string("应为字符串数组，实际是") + value->type_name());
+    return;
+  }
+  std::vector<std::string> parsed;
+  parsed.reserve(value->elements.size());
+  for (const JsonValue& item : value->elements) {
+    if (!item.is_string() || item.text.empty()) {
+      report_error(item, path, "数组元素必须是非空字符串");
+      return;
+    }
+    parsed.push_back(item.text);
+  }
+  out = std::move(parsed);
+}
+
 void ConfigReader::take_integer(std::string_view path, u64 min, u64 max, u64& out) {
   const JsonValue* value = lookup(path);
   if (value == nullptr) {

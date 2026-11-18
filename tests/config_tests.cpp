@@ -172,6 +172,25 @@ DUO_TEST(sender_config_applies_all_sections) {
   std::filesystem::remove(path);
 }
 
+DUO_TEST(sender_config_reads_multi_target_and_relay) {
+  const std::string path = write_temp("sender_multi", R"({
+    "target_hosts": ["192.168.10.2", "192.168.10.3"],
+    "target_port": 51000,
+    "relay_host": "192.168.10.10",
+    "relay_port": 52000
+  })");
+  duo::SenderConfig config;
+  std::string error;
+  DUO_CHECK_EQ(duo::apply_sender_config_file(path, config, error), duo::Status::Ok);
+  DUO_CHECK_EQ(config.target_hosts.size(), 2u);
+  DUO_CHECK_EQ(config.target_hosts[0], std::string("192.168.10.2"));
+  DUO_CHECK_EQ(config.target_hosts[1], std::string("192.168.10.3"));
+  DUO_CHECK_EQ(config.target_port, static_cast<duo::u16>(51000));
+  DUO_CHECK_EQ(config.relay_host, std::string("192.168.10.10"));
+  DUO_CHECK_EQ(config.relay_port, static_cast<duo::u16>(52000));
+  std::filesystem::remove(path);
+}
+
 DUO_TEST(sender_config_reports_unknown_key) {
   const std::string path = write_temp("sender_unknown", R"({
     "fps": 60,

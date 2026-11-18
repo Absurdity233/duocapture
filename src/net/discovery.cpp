@@ -235,8 +235,8 @@ void DiscoveryResponder::loop() {
   }
 }
 
-bool discover_receiver(u16 discovery_port, u16 ack_port, int timeout_ms, DiscoveryReply& out,
-                       std::string& error) {
+bool discover_receivers(u16 discovery_port, u16 ack_port, int timeout_ms,
+                        std::vector<DiscoveryReply>& out, std::string& error) {
   UdpSocket socket;
   Status status = socket.open("0.0.0.0", 0, true);
   if (!ok(status)) {
@@ -288,9 +288,11 @@ bool discover_receiver(u16 discovery_port, u16 ack_port, int timeout_ms, Discove
     if (reply.nonce != probe.nonce) {
       continue;  // 别人的迟到应答
     }
-    out = reply;
-    out.host = from_host;
-    return true;
+    reply.host = from_host;
+    const auto duplicate = std::find_if(out.begin(), out.end(), [&](const DiscoveryReply& item) {
+      return item.host == reply.host && item.video_port == reply.video_port;
+    });
+    if (duplicate == out.end()) out.push_back(std::move(reply));
   }
 
   // 把试过的地址列出来：最常见的原因就是接收端根本没启动，或者
@@ -302,6 +304,7 @@ bool discover_receiver(u16 discovery_port, u16 ack_port, int timeout_ms, Discove
     }
     tried += t;
   }
+  if (!out.empty()) return true;
   error = "在 " + std::to_string(timeout_ms / 1000) + " 秒内没有收到应答。\n" +
           "  已向这些地址广播探测（端口 " + std::to_string(discovery_port) + "）：" + tried +
           "\n" +
@@ -314,6 +317,14 @@ bool discover_receiver(u16 discovery_port, u16 ack_port, int timeout_ms, Discove
           "   3. 两端在同一网段（不在同一 VLAN / 路由器隔离 / 客户端隔离）\n" +
           "  或者直接用 --target <接收端IP> 跳过发现。";
   return false;
+}
+
+bool discover_receiver(u16 discovery_port, u16 ack_port, int timeout_ms, DiscoveryReply& out,
+                       std::string& error) {
+  std::vector<DiscoveryReply> replies;
+  if (!discover_receivers(discovery_port, ack_port, timeout_ms, replies, error)) return false;
+  out = std::move(replies.front());
+  return true;
 }
 
 bool DiscoveryResponder::last_sender(std::string& host, u16& ack_port) const {

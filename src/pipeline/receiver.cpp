@@ -659,7 +659,7 @@ void Receiver::set_analysis_plugin(void* adapter, AnalysisTap::Callback thunk, v
 }
 
 void Receiver::draw_detection_boxes(void* user, ID3D11Texture2D* back_buffer, u32 width,
-                                    u32 height) {
+                                    u32 height, u32 source_width, u32 source_height) {
   auto* self = static_cast<Receiver*>(user);
   if (self == nullptr || !self->config_.boxes_overlay || self->boxes_fetch_ == nullptr) {
     return;
@@ -671,9 +671,16 @@ void Receiver::draw_detection_boxes(void* user, ID3D11Texture2D* back_buffer, u3
     return;
   }
   // 框的坐标以解码帧为基准，窗口尺寸可能不同（视频处理器会拉伸）。
-  const u32 src_w = self->width_ != 0 ? self->width_ : width;
-  const u32 src_h = self->height_ != 0 ? self->height_ : height;
-  self->box_overlay_.draw(back_buffer, width, height, boxes, count, src_w, src_h);
+  //
+  // 这里必须用 present() 传进来的源尺寸。之前用 width_/height_，那是
+  // ensure_decoder(config_.width, config_.height) 写进去的，而配置默认是 0
+  // （跟随码流），于是退化成窗口尺寸——2560x1600 的帧按 1280x720 换算，
+  // 框全挤在左上角。
+  if (source_width == 0 || source_height == 0) {
+    return;
+  }
+  self->box_overlay_.draw(back_buffer, width, height, boxes, count, source_width,
+                          source_height);
 }
 
 }  // namespace duo
