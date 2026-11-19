@@ -278,6 +278,22 @@ DUO_TEST(jitter_buffer_fec_after_nack_retransmit) {
   DUO_CHECK_EQ(jitter.stats().packets_recovered, 1ull);
 }
 
+DUO_TEST(pacer_default_burst_is_bounded) {
+  duo::Pacer pacer(1000ull * 1000);  // 1 MB/s, default burst is 8 ms.
+  duo::Packet packet;
+  packet.header.payload_len = duo::kMaxPacketPayload;
+  packet.payload.assign(duo::kMaxPacketPayload, 0);
+  for (int i = 0; i < 10; ++i) {
+    pacer.enqueue(packet);
+  }
+
+  std::vector<duo::Packet> out(10);
+  const std::size_t released = pacer.poll(duo::Clock::now_ns(), out.data(), out.size());
+  DUO_CHECK(released > 0);
+  DUO_CHECK(released < 10);
+  DUO_CHECK_EQ(pacer.queued(), static_cast<std::size_t>(10 - released));
+}
+
 DUO_TEST(pacer_throttles) {
   // 1 MB/s，100 个满载包（约 123 KB）远超 burst 上限，必须分多次才放完。
   duo::Pacer pacer(1000ull * 1000, 8 * 1024);  // 1 MB/s, burst 8 KB

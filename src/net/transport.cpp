@@ -52,7 +52,8 @@ std::intptr_t to_handle(NativeSocket socket) noexcept { return static_cast<std::
 UdpSocket::~UdpSocket() { close(); }
 
 UdpSocket::UdpSocket(UdpSocket&& other) noexcept
-    : handle_(other.handle_), bytes_sent_(other.bytes_sent_), bytes_received_(other.bytes_received_) {
+    : handle_(other.handle_), ipv4_cache_(std::move(other.ipv4_cache_)),
+      bytes_sent_(other.bytes_sent_), bytes_received_(other.bytes_received_) {
   other.handle_ = -1;
   other.bytes_sent_ = 0;
   other.bytes_received_ = 0;
@@ -62,6 +63,10 @@ UdpSocket& UdpSocket::operator=(UdpSocket&& other) noexcept {
   if (this != &other) {
     close();
     handle_ = other.handle_;
+    {
+      std::scoped_lock lock(endpoint_mutex_, other.endpoint_mutex_);
+      ipv4_cache_ = std::move(other.ipv4_cache_);
+    }
     bytes_sent_ = other.bytes_sent_;
     bytes_received_ = other.bytes_received_;
     other.handle_ = -1;
@@ -114,6 +119,10 @@ Status UdpSocket::open(const std::string& bind_host, u16 port, bool reuse_addr) 
 }
 
 void UdpSocket::close() {
+  {
+    std::lock_guard<std::mutex> lock(endpoint_mutex_);
+    ipv4_cache_.clear();
+  }
   if (handle_ == -1) {
     return;
   }
@@ -182,8 +191,17 @@ Status UdpSocket::send_to(ByteSpan data, const std::string& host, u16 port) {
   sockaddr_in addr{};
   addr.sin_family = AF_INET;
   addr.sin_port = htons(port);
-  if (::inet_pton(AF_INET, host.c_str(), &addr.sin_addr) != 1) {
-    return Status::InvalidArgument;
+  {
+    std::lock_guard<std::mutex> lock(endpoint_mutex_);
+    const auto cached = ipv4_cache_.find(host);
+    if (cached != ipv4_cache_.end()) {
+      addr.sin_addr.s_addr = cached->second;
+    } else {
+      if (::inet_pton(AF_INET, host.c_str(), &addr.sin_addr) != 1) {
+        return Status::InvalidArgument;
+      }
+      ipv4_cache_.emplace(host, addr.sin_addr.s_addr);
+    }
   }
 
   const int sent = ::sendto(to_native(handle_), reinterpret_cast<const char*>(data.data()),

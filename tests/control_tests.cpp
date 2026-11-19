@@ -91,6 +91,32 @@ DUO_TEST(control_rejects_bad_magic) {
   DUO_CHECK(!duo::parse_control(duo::ByteSpan(junk.data(), junk.size()), header, payload));
 }
 
+DUO_TEST(control_rejects_malformed_payload_length) {
+  const duo::NackRange range{3, 5, 9};
+  duo::Bytes msg = duo::serialize_control(
+      duo::ControlType::Nack,
+      duo::ByteSpan(reinterpret_cast<const duo::u8*>(&range), sizeof(range)));
+  msg.pop_back();
+  duo::ControlHeader header{};
+  duo::ByteSpan payload;
+  DUO_CHECK(!duo::parse_control(duo::ByteSpan(msg.data(), msg.size()), header, payload));
+}
+
+DUO_TEST(control_rejects_payload_on_idr) {
+  const duo::u8 byte = 1;
+  const duo::Bytes msg = duo::serialize_control(
+      duo::ControlType::RequestIdr, duo::ByteSpan(&byte, 1));
+  duo::ControlHeader header{};
+  duo::ByteSpan payload;
+  DUO_CHECK(!duo::parse_control(duo::ByteSpan(msg.data(), msg.size()), header, payload));
+}
+
+DUO_TEST(nack_index_max_does_not_wrap) {
+  const std::vector<std::pair<duo::u32, duo::u16>> missing = {{7, 65535}, {7, 0}};
+  const auto ranges = duo::compact_nacks(missing);
+  DUO_CHECK_EQ(ranges.size(), static_cast<std::size_t>(2));
+}
+
 DUO_TEST(control_idr_request_has_no_payload) {
   const duo::Bytes msg = duo::serialize_control(duo::ControlType::RequestIdr, {});
   duo::ControlHeader header{};

@@ -58,6 +58,11 @@ Status RelayServer::start(const RelayConfig& config, bool background) {
     return status;
   }
 
+  video_socket_.set_recv_buffer(8u * 1024u * 1024u);
+  control_socket_.set_recv_buffer(1u * 1024u * 1024u);
+  video_send_socket_.set_send_buffer(8u * 1024u * 1024u);
+  control_send_socket_.set_send_buffer(1u * 1024u * 1024u);
+
   background_ = background;
   running_.store(true, std::memory_order_release);
   if (background_) {

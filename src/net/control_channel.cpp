@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <limits>
 
 namespace duo {
 
@@ -19,7 +20,9 @@ std::vector<NackRange> compact_nacks(const std::vector<std::pair<u32, u16>>& mis
   for (std::size_t i = 1; i < sorted.size(); ++i) {
     const auto& [frame_id, index] = sorted[i];
     // 同一帧且索引连续（或重叠）就并进当前区间
-    if (frame_id == current.frame_id && index <= static_cast<u16>(current.end + 1)) {
+    if (frame_id == current.frame_id &&
+        (index <= current.end ||
+         (current.end != std::numeric_limits<u16>::max() && index == current.end + 1))) {
       current.end = std::max<u16>(current.end, index);
       continue;
     }
@@ -55,8 +58,17 @@ bool parse_control(ByteSpan data, ControlHeader& header_out, ByteSpan& payload_o
   if (header.magic != kControlMagic) {
     return false;
   }
+  const ByteSpan payload = data.subspan(sizeof(ControlHeader));
+  if (header.type == static_cast<u8>(ControlType::Nack)) {
+    if (header.count == 0 || header.count > kMaxNackRanges ||
+        payload.size() != static_cast<std::size_t>(header.count) * sizeof(NackRange)) {
+      return false;
+    }
+  } else if (header.count != 0 || !payload.empty()) {
+    return false;
+  }
   header_out = header;
-  payload_out = data.subspan(sizeof(ControlHeader));
+  payload_out = payload;
   return true;
 }
 

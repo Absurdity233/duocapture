@@ -216,8 +216,10 @@ void Receiver::receive_loop() {
 
     const Status status =
         socket_.recv_from(duo::MutByteSpan(buffer.data(), buffer.size()), received, from_host,
-                          from_port, 100);
+                          from_port, 5);
     if (status == Status::Timeout) {
+      jitter_.service(Clock::now_ns());
+      send_nacks();
       continue;
     }
     if (!ok(status)) {
@@ -343,9 +345,8 @@ void Receiver::receive_loop() {
       }
       frame_cv_.notify_one();
     }
+    send_nacks();
   }
-
-  send_nacks();
 }
 
 void Receiver::send_nacks() {

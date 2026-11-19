@@ -2,7 +2,9 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <mutex>
 #include <string>
+#include <unordered_map>
 
 #include "duocapture/common/status.h"
 #include "duocapture/common/types.h"
@@ -45,6 +47,8 @@ class UdpSocket {
 
  private:
   std::intptr_t handle_ = -1;
+  mutable std::mutex endpoint_mutex_;
+  std::unordered_map<std::string, u32> ipv4_cache_;
   u64 bytes_sent_ = 0;
   u64 bytes_received_ = 0;
 };
